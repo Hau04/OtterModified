@@ -78,7 +78,7 @@ OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
 ### 前置要求
 
-- Node.js 20.9+ for the frontend; Node.js 22+ for the VPS backend
+- Node.js 20.9+ to build the frontend; Node.js 18+ to run the VPS backend (Node 19 is end-of-life; use a maintained LTS release when available)
 - Cloudflare 账号（免费）
 - Telegram Bot Token
 
@@ -118,13 +118,13 @@ npm start
 
 ## 🟢 Node.js VPS deployment (Cloudflare alternative)
 
-The standalone **Express + SQLite** backend in `node-vps/` serves the exported Next.js frontend and stores metadata, files, and upload chunks on the VPS disk. It does not require Cloudflare Workers, KV, R2, or Telegram. The existing Cloudflare Worker remains available in `functions/`.
+The standalone **Express + SQLite** backend in `node-vps/` serves the exported Next.js frontend and stores metadata, files, and upload chunks on the VPS disk. SQLite runs through `sql.js` WebAssembly, avoiding native-addon compilation and GLIBC-specific binaries. The release archive includes the prebuilt frontend; building it from source requires Node.js 20.9+. The backend runtime supports Node.js 18+. It does not require Cloudflare Workers, KV, R2, or Telegram. The existing Cloudflare Worker remains available in `functions/`.
 
 > **Data migration:** the Node.js VPS backend uses a separate SQLite/local-filesystem store. Existing files and metadata in Cloudflare KV, R2, or Telegram are **not copied automatically**; export/import them separately if you need to preserve them.
 
 ### Run locally
 
-Use Node.js 22 or later. Build the static frontend, then start the Node API:
+Use Node.js 20.9 or later to build the static frontend; the Node API runtime supports Node.js 18 or later. Build the static frontend, then start the Node API:
 
 ```bash
 cd frontend
@@ -161,7 +161,7 @@ Open `http://localhost:8000`.
 
 ### Prepare an Ubuntu/Debian VPS (one time)
 
-Install **Node.js 22 LTS and npm** system-wide (the systemd unit expects `/usr/bin/node`) and Nginx. The SQLite package uses a prebuilt binary on supported Node 22/Linux platforms; if npm must compile it from source, install the native build toolchain required by your distribution. Keep enough persistent disk for your files and backups. Run the initial setup from a repository checkout on the VPS and replace `DEPLOY_USER` with the SSH account GitHub Actions will use:
+Install a maintained Node.js LTS release and npm system-wide (the systemd unit expects `/usr/bin/node`) and Nginx. The VPS backend uses SQLite compiled to WebAssembly, so it does not need a native SQLite addon, a C++ compiler, or a matching GLIBC prebuild. Node.js 18+ works for the API; the frontend build requires Node.js 20.9+. Node.js 19 is end-of-life and should only be used if the host cannot offer a maintained version. Keep enough persistent disk for your files and backups. Run the initial setup from a repository checkout on the VPS and replace `DEPLOY_USER` with the SSH account GitHub Actions will use:
 
 ```bash
 sudo apt update

@@ -7,6 +7,7 @@ const path = require('node:path');
 const { after, before, test } = require('node:test');
 const request = require('supertest');
 const { loadConfig } = require('../src/config');
+const { DatabaseStore } = require('../src/database');
 const { createApp } = require('../src/app');
 
 let root;
@@ -30,8 +31,8 @@ before(async () => {
     CHUNK_SIZE_BYTES: '4',
     MAX_FILE_COUNT: '100',
   });
-  app = createApp(config);
-  store = app.locals.store;
+  store = await DatabaseStore.open(config.databasePath);
+  app = createApp(config, { store });
 });
 
 after(async () => {
@@ -136,13 +137,37 @@ test('enforces Basic Auth while keeping health checks available', async () => {
     TEMP_UPLOAD_DIR: path.join(root, 'auth-data', 'uploads'),
     FRONTEND_DIR: path.join(root, 'missing-static'),
   });
-  const authApp = createApp(authConfig);
+  const authStore = await DatabaseStore.open(authConfig.databasePath);
+  const authApp = createApp(authConfig, { store: authStore });
   const unauthorized = await request(authApp).get('/api/list');
   assert.equal(unauthorized.status, 401);
   assert.match(unauthorized.headers['www-authenticate'], /^Basic /);
   assert.equal((await request(authApp).get('/healthz')).status, 200);
   assert.equal((await request(authApp).get('/api/list').auth('otter', 'secret')).status, 200);
-  authApp.locals.store.close();
+  authStore.close();
+});
+
+test('persists SQLite data when the store is reopened', async () => {
+  const databasePath = path.join(root, 'persistent-data', 'metadata.sqlite3');
+  const first = await DatabaseStore.open(databasePath);
+  first.createFile('img:persistent', { uploadedAt: 123, liked: true }, '/files/persistent');
+  first.createFolder({
+    id: 'folder-persistent',
+    name: 'Persistent album',
+    coverKey: 'img:persistent',
+    createdAt: 123,
+    updatedAt: 123,
+  });
+  first.close();
+
+  const reopened = await DatabaseStore.open(databasePath);
+  assert.deepEqual(reopened.getFile('img:persistent'), {
+    name: 'img:persistent',
+    metadata: { uploadedAt: 123, liked: true },
+    storagePath: '/files/persistent',
+  });
+  assert.equal(reopened.getFolder('folder-persistent').name, 'Persistent album');
+  reopened.close();
 });
 
 test('rejects placeholder production credentials and foldered non-image uploads', async () => {
