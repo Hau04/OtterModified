@@ -1,0 +1,200 @@
+name: Python VPS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to publish (for example v1.2.0)
+        required: true
+        type: string
+      deploy_to_vps:
+        description: Also deploy this release to the configured Python VPS
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: python-vps-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, build, package, and release
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Python dependencies and test tools
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Test Python API
+        working-directory: backend
+        run: pytest -q
+
+      - name: Install and build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Package VPS release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid release version"; exit 1; }
+          mkdir -p release-artifacts
+          tar --exclude='__pycache__' --exclude='*.py[cod]' \
+            -czf "release-artifacts/otterhub-${RELEASE_VERSION}.tar.gz" \
+            backend/app \
+            backend/requirements.txt \
+            backend/.env.example \
+            frontend/out \
+            deploy/otterhub.service \
+            deploy/nginx.conf.example \
+            README.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package="release-artifacts/otterhub-${RELEASE_VERSION}.tar.gz"
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_VERSION" "$package" --clobber
+          else
+            gh release create "$RELEASE_VERSION" "$package" \
+              --target "$GITHUB_SHA" \
+              --title "OtterHub ${RELEASE_VERSION}" \
+              --generate-notes
+          fi
+
+      - name: Configure SSH for VPS
+        if: ${{ github.event_name == 'push' || inputs.deploy_to_vps }}
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_SSH_PRIVATE_KEY" || { echo "Set the VPS_SSH_PRIVATE_KEY secret"; exit 1; }
+          test -n "$VPS_KNOWN_HOSTS" || { echo "Set the VPS_KNOWN_HOSTS secret"; exit 1; }
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Upload release to VPS
+        if: ${{ github.event_name == 'push' || inputs.deploy_to_vps }}
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST" || { echo "Set the VPS_HOST secret"; exit 1; }
+          test -n "$VPS_USER" || { echo "Set the VPS_USER secret"; exit 1; }
+          VPS_PORT="${VPS_PORT:-22}"
+          archive="release-artifacts/otterhub-${RELEASE_VERSION}.tar.gz"
+          ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" \
+            "mkdir -p /opt/otterhub/releases /opt/otterhub/shared"
+          scp -P "$VPS_PORT" "$archive" \
+            "$VPS_USER@$VPS_HOST:/tmp/otterhub-${RELEASE_VERSION}.tar.gz"
+          ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" \
+            "RELEASE_VERSION='$RELEASE_VERSION' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_ROOT=/opt/otterhub
+          RELEASE_DIR="$APP_ROOT/releases/$RELEASE_VERSION"
+          ARCHIVE="/tmp/otterhub-${RELEASE_VERSION}.tar.gz"
+
+          test -f "$APP_ROOT/shared/otterhub.env" || { echo "Missing $APP_ROOT/shared/otterhub.env; finish VPS bootstrap first"; exit 1; }
+          sudo systemctl cat otterhub >/dev/null || { echo "Install deploy/otterhub.service before deploying"; exit 1; }
+
+          mkdir -p "$RELEASE_DIR"
+          OLD_RELEASE="$(readlink -f "$APP_ROOT/current" 2>/dev/null || true)"
+          if [[ "$OLD_RELEASE" == "$RELEASE_DIR" ]]; then
+            echo "Release $RELEASE_VERSION is already active; deploy a new version instead"
+            exit 1
+          fi
+
+          tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
+          python3 -m venv "$RELEASE_DIR/.venv"
+          "$RELEASE_DIR/.venv/bin/pip" install --upgrade pip
+          "$RELEASE_DIR/.venv/bin/pip" install -r "$RELEASE_DIR/backend/requirements.txt"
+
+          rollback() {
+            echo "Deployment failed; restoring previous release"
+            if [[ -n "$OLD_RELEASE" && -d "$OLD_RELEASE" ]]; then
+              ln -sfn "$OLD_RELEASE" "$APP_ROOT/current-rollback"
+              mv -Tf "$APP_ROOT/current-rollback" "$APP_ROOT/current"
+              sudo systemctl restart otterhub || true
+            else
+              rm -f "$APP_ROOT/current"
+              sudo systemctl stop otterhub || true
+            fi
+          }
+
+          ln -sfn "$RELEASE_DIR" "$APP_ROOT/current-next"
+          mv -Tf "$APP_ROOT/current-next" "$APP_ROOT/current"
+          if ! sudo systemctl restart otterhub; then
+            rollback
+            exit 1
+          fi
+
+          healthy=0
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$healthy" != 1 ]]; then
+            rollback
+            exit 1
+          fi
+
+          curl --fail --silent http://127.0.0.1:8000/healthz
+          for old_release in "$APP_ROOT"/releases/*; do
+            [[ -d "$old_release" ]] || continue
+            [[ "$old_release" == "$RELEASE_DIR" ]] && continue
+            [[ -n "$OLD_RELEASE" && "$old_release" == "$OLD_RELEASE" ]] && continue
+            rm -rf -- "$old_release"
+          done
+          rm -f "$ARCHIVE"
+          REMOTE
+
+      - name: Save release package as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: otterhub-${{ env.RELEASE_VERSION }}
+          path: release-artifacts/otterhub-${{ env.RELEASE_VERSION }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30

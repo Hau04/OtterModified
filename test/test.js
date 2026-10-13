@@ -47,6 +47,86 @@ describe("File API Endpoints", function () {
     });
   });
 
+  describe("Photo folder endpoints", function () {
+    it("should assign photos, set a poster, and preserve photos when deleting an album", async function () {
+      if (!uploadedFileKey) {
+        this.skip();
+      }
+
+      let folderId;
+      try {
+        const createResponse = await fetch("http://localhost:8080/api/folders", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: BASIC_AUTH,
+          },
+          body: JSON.stringify({ name: `Test album ${Date.now()}` }),
+        });
+        assert.equal(createResponse.status, 200);
+        const created = await createResponse.json();
+        assert.ok(created.success);
+        folderId = created.data.id;
+
+        const assignResponse = await fetch(
+          `http://localhost:8080/api/editFileMeta/${uploadedFileKey}`,
+          {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: BASIC_AUTH,
+            },
+            body: JSON.stringify({ folderId }),
+          },
+        );
+        assert.equal(assignResponse.status, 200);
+        assert.ok((await assignResponse.json()).success);
+
+        const posterResponse = await fetch(
+          `http://localhost:8080/api/folders/${folderId}`,
+          {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: BASIC_AUTH,
+            },
+            body: JSON.stringify({ coverKey: uploadedFileKey }),
+          },
+        );
+        assert.equal(posterResponse.status, 200);
+        const updatedFolder = await posterResponse.json();
+        assert.equal(updatedFolder.data.coverKey, uploadedFileKey);
+
+        const deleteFolderResponse = await fetch(
+          `http://localhost:8080/api/folders/${folderId}`,
+          {
+            method: "DELETE",
+            headers: { Authorization: BASIC_AUTH },
+          },
+        );
+        assert.equal(deleteFolderResponse.status, 200);
+        const deletedFolder = await deleteFolderResponse.json();
+        assert.ok(deletedFolder.data.detachedKeys.includes(uploadedFileKey));
+        folderId = undefined;
+
+        const listResponse = await fetch("http://localhost:8080/api/list?fileType=img", {
+          headers: { Authorization: BASIC_AUTH },
+        });
+        const fileList = await listResponse.json();
+        const photo = fileList.data.keys.find((item) => item.name === uploadedFileKey);
+        assert.ok(photo);
+        assert.equal(photo.metadata.folderId, undefined);
+      } finally {
+        if (folderId) {
+          await fetch(`http://localhost:8080/api/folders/${folderId}`, {
+            method: "DELETE",
+            headers: { Authorization: BASIC_AUTH },
+          });
+        }
+      }
+    });
+  });
+
   // 获取
   describe("GET /file/:key", function () {
     it("should return the uploaded file without error", async function () {

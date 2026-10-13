@@ -1,5 +1,7 @@
 import { fail, ok } from "../../utils/common";
 import { DBAdapterFactory } from "../../utils/db-adapter";
+import { CF, FileMetadata } from "../../utils/types";
+import { getPhotoFolder, photoFolderKey } from "../../utils/photo-folders";
 
 const NOT_ALLOWED_DELETE = [
     'img:AgACAgUAAyEGAASJIjr1AAIDbmljUd7-V2sXHaws4e5zy5BvfIfkAAKmDmsbsDcYV1OLkqQ2W1brAQADAgADdwADOAQ.jpg',
@@ -20,10 +22,23 @@ export async function onRequestPost({ env, params, request }: any) {
       return fail('You can not delete default file', 403);
     }
 
+    const kv = env[CF.KV_NAME];
+    const file = await kv.getWithMetadata(params.key);
+    const metadata = file?.metadata as FileMetadata | undefined;
+
     const db = DBAdapterFactory.getAdapter(env);
     const isDeleted = await db.delete(params.key);
     if (!isDeleted) {
       return fail('Failed to delete file', 404);
+    }
+
+    if (metadata?.folderId) {
+      const folder = await getPhotoFolder(kv, metadata.folderId);
+      if (folder?.coverKey === params.key) {
+        folder.coverKey = null;
+        folder.updatedAt = Date.now();
+        await kv.put(photoFolderKey(folder.id), '', { metadata: folder });
+      }
     }
 
     // 删除缓存

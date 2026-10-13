@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Trash2, X, Toolbox, Check, Tag } from "lucide-react";
+import { Download, Trash2, X, Toolbox, Check, Tag, FolderInput } from "lucide-react";
 import { useState, useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { BatchAddTagsDialog } from "@/components/batch-add-tags-dialog";
+import { FolderAssignmentDialog } from "@/components/folder-assignment-dialog";
 
 import { useActiveItems, useFileStore } from "@/lib/file-store";
 import { deleteFile, getFileUrl } from "@/lib/api";
@@ -30,6 +31,7 @@ export function BatchOperationsBar() {
 
   const { toast } = useToast();
   const [showBatchTags, setShowBatchTags] = useState(false);
+  const [showFolderAssignment, setShowFolderAssignment] = useState(false);
 
   const items = useActiveItems();
 
@@ -43,6 +45,10 @@ export function BatchOperationsBar() {
     () => new Map(items.map((f) => [f.name, f])),
     [items],
   );
+  const selectedImageFiles =
+    activeType === FileType.Image
+      ? items.filter((item) => selectedSet.has(item.name))
+      : [];
 
   const isAllSelected =
     items.length > 0 && selectedKeys.length === items.length;
@@ -110,9 +116,13 @@ export function BatchOperationsBar() {
 
     const failed = results.filter((r) => !r.success);
 
-    results
-      .filter((r) => r.success)
-      .forEach((r) => fileStore.deleteFilesLocal([r.key]));
+    const deletedItems = results.filter((result) => result.success);
+    deletedItems.forEach((result) => fileStore.deleteFilesLocal([result.key]));
+    if (activeType === FileType.Image && deletedItems.length > 0) {
+      fileStore.fetchFolders(true).catch((error) => {
+        console.error("Unable to refresh albums:", error);
+      });
+    }
 
     if (failed.length > 0) {
       toast({
@@ -144,6 +154,18 @@ export function BatchOperationsBar() {
               <Download className="mr-2 h-4 w-4" />
               Download
             </Button>
+
+            {activeType === FileType.Image && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-white hover:bg-white/20"
+                onClick={() => setShowFolderAssignment(true)}
+              >
+                <FolderInput className="mr-2 h-4 w-4" />
+                Album
+              </Button>
+            )}
 
             <Button
               size="sm"
@@ -213,6 +235,13 @@ export function BatchOperationsBar() {
         onOpenChange={setShowBatchTags}
         onSuccess={handleBatchSuccess}
       />
+      {activeType === FileType.Image && (
+        <FolderAssignmentDialog
+          files={selectedImageFiles}
+          open={showFolderAssignment}
+          onOpenChange={setShowFolderAssignment}
+        />
+      )}
     </>
   );
 }

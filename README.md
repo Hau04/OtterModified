@@ -6,7 +6,7 @@
 <p align="center"><strong>Stash your files like an otter</strong></p>
 
 <p align="center">
-  基于 Cloudflare KV + Telegram Bot API 的免费私人云盘
+  基于 Cloudflare Worker 的私人云盘，并提供 FastAPI + SQLite 的 Python VPS 部署模式
 </p>
 
 <p align="center">
@@ -33,10 +33,9 @@
 
 OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
-- 基于 **Cloudflare Pages + KV**
-- 使用 **Telegram Bot** 作为实际文件存储
-- 通过 **分片上传** 突破 20MB 单文件限制
-- 支持 **HTTP Range**，适合视频 / 大文件访问
+- **Cloudflare 模式**：Cloudflare Pages + KV，使用 Telegram Bot 作为实际文件存储
+- **Python VPS 模式**：FastAPI + SQLite，文件与上传分片存储在 VPS 本地磁盘
+- 两种模式均保留 **分片上传** 和 **HTTP Range**，支持视频与大文件访问
 - 架构克制、状态最小化，优先长期可维护性
 
 它不追求"什么都支持"，而是专注于**刚好够用、稳定、好维护**。
@@ -57,15 +56,16 @@ OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
 - **私人文件存储**：
   - 支持图片 / 音频 / 视频 / 文档
-  - KV Key 按类型划分前缀 `img:` `audio:` `video:` `doc:`，提升查询效率
+  - Cloudflare 模式使用按类型划分的 KV Key (`img:` / `audio:` / `video:` / `doc:`)；Python 模式使用 SQLite 元数据
 - **大文件支持**：
   - 分片上传（≤20MB/片），已实测稳定上传并预览 **100MB** 文件，理论最大 1GB
   - 支持 HTTP Range，视频/音频按需加载，支持断点续传
 - **实时预览**：
   - 通过文件 URL 直接打开，无需下载
   - 支持：图片 / 音频 / 视频 / 文本（txt、pdf 等）
+- **照片相册（Emby 风格）**：创建相册、整理或上传照片到相册、选择照片作为相册海报；打开相册后可在相册内连续预览图片
 - **可控性能与流量**：
-  - 非 Range 请求走 Cloudflare Cache，Range 请求直出避免缓存污染
+  - Cloudflare 模式下非 Range 请求走 Cloudflare Cache，Range 请求直出避免缓存污染
   - 图片加载策略：默认 / 省流（>5MB 不加载）/ 无图
 - **安全与私密**：
   - 账号密码登录（Basic Auth）
@@ -113,6 +113,84 @@ npm start
 ```
 
 > 该命令会先打包前端，然后启动后端（前端无热更新）
+
+---
+
+## 🐍 Python VPS deployment (Cloudflare alternative)
+
+This repository also includes a standalone **FastAPI + SQLite** backend in `backend/`. It serves the exported Next.js frontend from the same origin and stores metadata, files, and temporary upload chunks on the VPS disk. It does not require Cloudflare Workers, KV, R2, or Telegram. The existing Cloudflare Worker implementation remains available in `functions/`.
+
+> **Data migration:** switching to the Python backend starts a separate, empty SQLite/local-filesystem store. Files and metadata currently held in Cloudflare KV, R2, or Telegram are **not copied automatically**; export/import them separately before switching if you need to preserve them.
+
+### Run locally
+
+Build the static frontend first, then start FastAPI from the `backend/` directory:
+
+```bash
+cd frontend
+npm ci
+npm run build
+
+cd ../backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+APP_ENV=development DATA_DIR=./data FRONTEND_DIR=../frontend/out \
+  uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000`. For local Basic Auth, set both `BASIC_USER` and `BASIC_PASS` before starting the service. The production environment template is [`backend/.env.example`](backend/.env.example); production startup rejects its placeholder credentials until you replace them.
+
+### Prepare an Ubuntu/Debian VPS (one time)
+
+Use Python 3.12 (recommended), Nginx, and enough persistent disk for your files plus backups. Run the initial setup from a checkout of this repository on the VPS. Replace `DEPLOY_USER` below with the SSH account that GitHub Actions will use:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv nginx curl
+sudo useradd --system --home-dir /var/lib/otterhub --create-home \
+  --shell /usr/sbin/nologin otterhub
+sudo install -d -o otterhub -g otterhub -m 0750 /var/lib/otterhub
+sudo install -d -o "$USER" -g otterhub -m 0755 \
+  /opt/otterhub/releases /opt/otterhub/shared
+sudo cp backend/.env.example /opt/otterhub/shared/otterhub.env
+sudoedit /opt/otterhub/shared/otterhub.env
+sudo chown root:otterhub /opt/otterhub/shared/otterhub.env
+sudo chmod 640 /opt/otterhub/shared/otterhub.env
+sudo chown "$USER":otterhub /opt/otterhub /opt/otterhub/releases /opt/otterhub/shared
+sudo chmod 755 /opt/otterhub /opt/otterhub/releases /opt/otterhub/shared
+
+sudo cp deploy/otterhub.service /etc/systemd/system/otterhub.service
+sudo systemctl daemon-reload
+sudo systemctl enable otterhub
+# Do not start it yet: the first release creates /opt/otterhub/current.
+```
+
+In `otterhub.env`, set a unique `BASIC_USER` and `BASIC_PASS`, and keep the persistent data paths under `/var/lib/otterhub`. Generate a password made of hex characters (for example, `openssl rand -hex 32`) to avoid environment-file quoting surprises. The service reads the shared environment file; do not put secrets in the release archive or Git.
+
+Make sure the SSH deploy account owns `/opt/otterhub` and can traverse/read the release directories. Give it only the required passwordless systemd commands, adjusting the systemctl path if needed:
+
+```bash
+sudo visudo -f /etc/sudoers.d/otterhub-deploy
+# Add this line, replacing DEPLOY_USER:
+DEPLOY_USER ALL=(root) NOPASSWD: /usr/bin/systemctl cat otterhub, /usr/bin/systemctl restart otterhub, /usr/bin/systemctl stop otterhub
+```
+
+Configure Nginx from [`deploy/nginx.conf.example`](deploy/nginx.conf.example): set your domain, enable the site, obtain a TLS certificate (for example with Certbot), and serve the app only over HTTPS. The example permits 25 MB HTTP request bodies for 20 MiB chunks; keep this in sync with the frontend chunk size. The app listens on `127.0.0.1:8000` and should not be exposed directly to the public internet.
+
+### Configure GitHub Actions and release
+
+Add these repository **Actions secrets** before deploying:
+
+- `VPS_HOST` — VPS hostname or IP
+- `VPS_USER` — SSH deploy account
+- `VPS_PORT` — optional SSH port (defaults to `22`)
+- `VPS_SSH_PRIVATE_KEY` — private key matching that account's `authorized_keys`
+- `VPS_KNOWN_HOSTS` — verified SSH host-key line(s) for the VPS
+
+The workflow [`.github/workflows/python-vps-release.yml`](.github/workflows/python-vps-release.yml) runs the Python API tests, TypeScript check, and static frontend build; it packages and publishes a GitHub Release. Push a version tag (for example `v1.0.0`) to publish **and deploy** it. You can instead run **Actions → Python VPS release → Run workflow**, enter a version, and choose whether to deploy. Deployments use a versioned Python virtual environment, keep the current and previous releases for rollback, and roll the `current` symlink back if the service health check fails.
+
+Back up `/var/lib/otterhub` (SQLite database and uploaded files) together. For a simple consistent snapshot, stop `otterhub`, archive that directory, then start the service again. The Worker and VPS datasets are independent; deploying this workflow does not delete or alter Cloudflare data.
 
 ---
 
@@ -295,6 +373,9 @@ TG_BOT_TOKEN=your_tg_bot_token  # Telegram Bot Token
 
 ```
 OtterHub/
+├── backend/          # Python FastAPI + SQLite backend for VPS deployment
+├── deploy/           # systemd and Nginx examples for the Python backend
+├── .github/workflows/python-vps-release.yml
 ├── frontend/
 ├── functions/         # Cloudflare Pages Functions
 │   ├── api/

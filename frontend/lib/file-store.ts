@@ -9,8 +9,9 @@ import {
   SortType,
   SortOrder,
   ImageLoadMode,
+  PhotoFolder,
 } from "./types";
-import { deleteFile, getFileList } from "./api";
+import { deleteFile, getFileList, getPhotoFolders } from "./api";
 import { STORAGE_KEYS, getFromStorage, setToStorage } from "./local-storage";
 import { useMemo } from "react";
 
@@ -58,6 +59,11 @@ interface FileStore {
   // selection 全局，暂不考虑分桶
   selectedKeys: string[];
 
+  // 图片相册
+  folders: PhotoFolder[];
+  foldersLoading: boolean;
+  foldersLoaded: boolean;
+
   // actions
   setActiveType: (type: FileType) => Promise<void>;
   fetchNextPage: () => Promise<void>;
@@ -67,6 +73,10 @@ interface FileStore {
   setSortOrder: (order: SortOrder) => void;
   setSafeMode: (enabled: boolean) => void;
   setImageLoadMode: (mode: ImageLoadMode) => void;
+  fetchFolders: (force?: boolean) => Promise<void>;
+  addFolderLocal: (folder: PhotoFolder) => void;
+  updateFolderLocal: (id: string, updates: Partial<PhotoFolder>) => void;
+  removeFolderLocal: (id: string) => void;
 
   addFileLocal: (file: FileItem, fileType: FileType) => void;
   deleteFilesLocal: (names: string[]) => void;
@@ -100,6 +110,9 @@ export const useFileStore = create<FileStore>((set, get) => ({
   },
 
   selectedKeys: [],
+  folders: [],
+  foldersLoading: false,
+  foldersLoaded: false,
 
   setActiveType: async (type) => {
     const { activeType, viewMode } = get();
@@ -190,6 +203,45 @@ export const useFileStore = create<FileStore>((set, get) => ({
     set({ imageLoadMode: mode });
     setToStorage(STORAGE_KEYS.IMAGE_LOAD_MODE, mode);
   },
+
+  fetchFolders: async (force = false) => {
+    const { foldersLoading, foldersLoaded } = get();
+    if (foldersLoading || (foldersLoaded && !force)) return;
+
+    set({ foldersLoading: true });
+    try {
+      const result = await getPhotoFolders();
+      set({
+        folders: result.folders,
+        foldersLoading: false,
+        foldersLoaded: true,
+      });
+    } catch (error) {
+      set({ foldersLoading: false });
+      throw error;
+    }
+  },
+
+  addFolderLocal: (folder) =>
+    set((state) => ({
+      folders: [
+        folder,
+        ...state.folders.filter((current) => current.id !== folder.id),
+      ],
+      foldersLoaded: true,
+    })),
+
+  updateFolderLocal: (id, updates) =>
+    set((state) => ({
+      folders: state.folders.map((folder) =>
+        folder.id === id ? { ...folder, ...updates } : folder,
+      ),
+    })),
+
+  removeFolderLocal: (id) =>
+    set((state) => ({
+      folders: state.folders.filter((folder) => folder.id !== id),
+    })),
 
   addFileLocal: (file, fileType) => {
     set((state) => {

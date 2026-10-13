@@ -1,0 +1,26 @@
+[Unit]
+Description=OtterHub Python API and static frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otterhub
+Group=otterhub
+WorkingDirectory=/opt/otterhub/current/backend
+EnvironmentFile=/opt/otterhub/shared/otterhub.env
+ExecStart=/opt/otterhub/current/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+Environment=PYTHONDONTWRITEBYTECODE=1
+ReadWritePaths=/var/lib/otterhub
+
+[Install]
+WantedBy=multi-user.target

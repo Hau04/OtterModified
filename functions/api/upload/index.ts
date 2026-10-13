@@ -1,6 +1,7 @@
 import { fail } from "../../utils/common";
 import { DBAdapterFactory } from "../../utils/db-adapter";
 import { CF, FileMetadata, FileTag, MAX_CHUNK_SIZE } from "../../utils/types";
+import { getPhotoFolder } from "../../utils/photo-folders";
 
 // 单个文件上传
 export async function onRequestPost(context: any) {
@@ -32,12 +33,25 @@ export async function onRequestPost(context: any) {
         const isNsfw = formData.get('nsfw') === 'true';
         console.log(formData);
 
-        const metadata : FileMetadata = {
+        const metadata: FileMetadata = {
             fileName,
             fileSize,
             uploadedAt: Date.now(),
             liked: false,
             tags: isNsfw ? [FileTag.NSFW] : [],
+        };
+
+        const requestedFolderId = formData.get("folderId");
+        if (typeof requestedFolderId === "string" && requestedFolderId) {
+            if (!uploadFile.type?.startsWith("image/")) {
+                return fail("Only image files can be uploaded to photo folders", 400);
+            }
+
+            const folder = await getPhotoFolder(env[CF.KV_NAME], requestedFolderId);
+            if (!folder) {
+                return fail("Photo folder not found", 404);
+            }
+            metadata.folderId = requestedFolderId;
         }
 
         // console.log('Uploading file:', fileName, fileSize);
@@ -60,8 +74,12 @@ async function checkFileCountLimit(
 ): Promise<boolean> {
   try {
     const kv = env[CF.KV_NAME];
-    const list = await kv.list({ limit: maxFiles });
-    return list.keys.length >= maxFiles;
+    const filePrefixes = ["img:", "audio:", "video:", "doc:"];
+    const lists = await Promise.all(
+      filePrefixes.map((prefix) => kv.list({ prefix, limit: maxFiles })),
+    );
+    const fileCount = lists.reduce((count, list) => count + list.keys.length, 0);
+    return fileCount >= maxFiles;
   } catch (error) {
     console.error("检查文件数量失败:", error);
     return false;
