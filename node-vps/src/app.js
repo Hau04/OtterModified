@@ -8,7 +8,6 @@ const express = require('express');
 const cors = require('cors');
 const mime = require('mime-types');
 const multer = require('multer');
-const { DatabaseStore } = require('./database');
 const {
   FILE_TYPES,
   KEY_PATTERN,
@@ -153,7 +152,8 @@ function createApp(config, options = {}) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
-  const store = options.store || new DatabaseStore(config.databasePath);
+  const store = options.store;
+  if (!store) throw new Error('createApp requires an initialized DatabaseStore');
   const app = express();
   app.disable('x-powered-by');
   app.locals.store = store;

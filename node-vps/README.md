@@ -1,8 +1,8 @@
 # OtterHub Node.js VPS backend
 
-This is the standalone Node.js API used by the VPS release workflow. It serves `frontend/out`, stores metadata in SQLite, and keeps files/chunks on the VPS. Run it behind Nginx and HTTPS.
+This is the standalone Node.js API used by the VPS release workflow. It serves `frontend/out`, stores metadata in a SQLite database through `sql.js` WebAssembly, and keeps files/chunks on the VPS disk. It does not need a native SQLite addon, compiler, or GLIBC-specific prebuild. Use Node.js 18 or newer for the API; the separately built Next.js frontend requires Node.js 20.9 or newer.
 
-For local development, build the frontend, install this package, and copy `.env.example` to `.env`. From this directory, change `APP_ENV` to `development`, clear `BASIC_USER` and `BASIC_PASS`, and set `DATA_DIR=./data`, `DATABASE_PATH=./data/otterhub.sqlite3`, `STORAGE_DIR=./data/files`, `CHUNKS_DIR=./data/chunks`, `TEMP_UPLOAD_DIR=./data/uploads`, and `FRONTEND_DIR=../frontend/out`.
+Run the frontend build in CI or on a compatible development machine before deploying. The release archive already contains `frontend/out`, so the VPS does not need to compile Next.js during startup. For local development, install this package and copy `.env.example` to `.env`. From this directory, change `APP_ENV` to `development`, clear `BASIC_USER` and `BASIC_PASS`, and set `DATA_DIR=./data`, `DATABASE_PATH=./data/otterhub.sqlite3`, `STORAGE_DIR=./data/files`, `CHUNKS_DIR=./data/chunks`, `TEMP_UPLOAD_DIR=./data/uploads`, and `FRONTEND_DIR=../frontend/out`.
 
 ```bash
 npm ci
