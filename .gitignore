@@ -2,3 +2,13 @@ node_modules
 data
 .wrangler
 .claude
+
+# Python VPS backend
+.venv/
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+backend/.env
+backend/data/

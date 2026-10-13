@@ -35,7 +35,16 @@ export type FileMetadata = {
   uploadedAt: number;   // 时间戳
   liked: boolean;      // 是否被收藏
   tags?: FileTag[] | string[];
+  folderId?: string;   // 图片所属的相册（虚拟文件夹）
   chunkInfo?: ChunkInfo; // 分片信息（大文件分片上传时使用）
+};
+
+export type PhotoFolder = {
+  id: string;
+  name: string;
+  coverKey: string | null;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export enum FileTag {

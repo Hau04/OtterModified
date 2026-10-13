@@ -2,8 +2,8 @@
 
 import type React from "react"
 
-import { useCallback, useRef, useState } from "react"
-import { Upload, AlertCircle } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Upload, AlertCircle, FolderOpen } from "lucide-react"
 import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/hooks/use-toast"
 import { uploadChunk, uploadChunkInit, uploadFile, checkIncompleteUpload } from "@/lib/api"
@@ -65,11 +65,26 @@ async function runBatches(
 export function FileUploadZone() {
   const addFileLocal = useFileStore((state) => state.addFileLocal)
   const updateFileMetadata = useFileStore((state) => state.updateFileMetadata)
+  const folders = useFileStore((state) => state.folders)
+  const fetchFolders = useFileStore((state) => state.fetchFolders)
+  const [targetFolderId, setTargetFolderId] = useState("")
   const [isDragging, setIsDragging] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
   const [resumePrompt, setResumePrompt] = useState<{ file: File; existingFile: FileItem } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
+
+  useEffect(() => {
+    fetchFolders().catch((error) => {
+      console.error("Unable to load photo folders:", error)
+    })
+  }, [fetchFolders])
+
+  useEffect(() => {
+    if (targetFolderId && !folders.some((folder) => folder.id === targetFolderId)) {
+      setTargetFolderId("")
+    }
+  }, [folders, targetFolderId])
 
   const processFiles = useCallback(
     async (files: FileList, skipResumeCheck = false, resumeFile?: FileItem) => {
@@ -113,12 +128,14 @@ export function FileUploadZone() {
         try {
           // 对图片文件进行 NSFW 检测, 非图片文件直接返回 false
           const isUnsafe = await nsfwDetector.isUnsafeImg(file)
-          const key = await uploadFile(file, isUnsafe)
+          const fileType = getFileType(file.type)
+          const folderId = fileType === FileType.Image ? targetFolderId || undefined : undefined
+          const key = await uploadFile(file, isUnsafe, folderId)
 
           uploadProgressMap[tmpKey] = 100
           setUploadProgress({ ...uploadProgressMap })
 
-          return { key, fileType: getFileType(file.type), isUnsafe }
+          return { key, fileType, isUnsafe, folderId }
         } catch (error) {
           throw new Error(`${file.name}: ${(error as Error).message}`)
         } finally {
@@ -133,11 +150,11 @@ export function FileUploadZone() {
       const uploadChunkedFile = async (
         file: File,
         resumeFile?: FileItem
-      ): Promise<{ key: string; fileType: FileType; isUnsafe: boolean } | null> => {
-        if (file.size >= MAX_FILE_SIZE) {
+      ): Promise<{ key: string; fileType: FileType; isUnsafe: boolean; folderId?: string } | null> => {
+        if (file.size > MAX_FILE_SIZE) {
           toast({
-            title: `文件大小超过 ${formatFileSize(MAX_FILE_SIZE)}`,
-            description: `Demo演示站不支持上传大文件`,
+            title: `File is larger than ${formatFileSize(MAX_FILE_SIZE)}`,
+            description: "Increase the Python server upload limit to accept larger files.",
             variant: "destructive",
           })
           return null
@@ -150,10 +167,22 @@ export function FileUploadZone() {
         try {
           const fileType = getFileType(file.type)
           const totalChunks = Math.ceil(file.size / MAX_CHUNK_SIZE)
+          const isUnsafe = resumeFile
+            ? (resumeFile.metadata.tags ?? []).includes(FileTag.NSFW)
+            : await nsfwDetector.isUnsafeImg(file)
+          const folderId = resumeFile?.metadata.folderId
+            ?? (fileType === FileType.Image ? targetFolderId || undefined : undefined)
 
           const key = resumeFile
             ? resumeFile.name
-            : await uploadChunkInit(fileType, file.name, file.size, totalChunks)
+            : await uploadChunkInit(
+                fileType,
+                file.name,
+                file.size,
+                totalChunks,
+                folderId,
+                isUnsafe,
+              )
 
           // ✅ 唯一可信来源：统一从 uploadedIndices 获取
           const uploadedIndices =
@@ -197,7 +226,7 @@ export function FileUploadZone() {
             uploadSingleChunk,
           )
 
-          return { key, fileType, isUnsafe: false }
+          return { key, fileType, isUnsafe, folderId }
         } catch (error) {
           throw new Error(`${file.name}: ${(error as Error).message}`)
         } finally {
@@ -233,6 +262,7 @@ export function FileUploadZone() {
                 uploadedAt: Date.now(),
                 liked: false,
                 tags: uploadResult.isUnsafe ? [FileTag.NSFW] : [],
+                ...(uploadResult.folderId ? { folderId: uploadResult.folderId } : {}),
               },
             }
             addFileLocal(fileItem, uploadResult.fileType)
@@ -266,7 +296,7 @@ export function FileUploadZone() {
         })
       }
     },
-    [addFileLocal, toast],
+    [addFileLocal, targetFolderId, toast, updateFileMetadata],
   )
 
   const handleDrop = useCallback(
@@ -310,6 +340,29 @@ export function FileUploadZone() {
 
   return (
     <div className="mb-6">
+      <div className="mb-3 flex flex-wrap items-center justify-center gap-3 text-sm">
+        <label htmlFor="upload-folder" className="flex items-center gap-2 text-white/70">
+          <FolderOpen className="h-4 w-4 text-emerald-300" />
+          Save photos to album
+        </label>
+        <select
+          id="upload-folder"
+          value={targetFolderId}
+          onChange={(event) => setTargetFolderId(event.target.value)}
+          className="h-9 min-w-48 rounded-md border border-white/20 bg-[#0d2137] px-3 text-white outline-none focus:border-emerald-400"
+        >
+          <option value="">Unfiled photos</option>
+          {folders.map((folder) => (
+            <option key={folder.id} value={folder.id}>
+              {folder.name}
+            </option>
+          ))}
+        </select>
+        {folders.length === 0 && (
+          <span className="text-xs text-white/40">Create an album in the Albums tab first.</span>
+        )}
+      </div>
+
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}

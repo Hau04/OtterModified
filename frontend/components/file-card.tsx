@@ -22,6 +22,7 @@ import {
   Info,
   AlertTriangle,
   Loader2,
+  Image as ImageIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +46,9 @@ interface FileCardProps {
   activeType?: FileType;
   listView?: boolean;
   masonryView?: boolean;
+  isFolderPoster?: boolean;
+  onSetFolderPoster?: () => void;
+  folderPosterUpdating?: boolean;
 }
 
 // 文件操作菜单组件
@@ -57,6 +61,9 @@ function FileActions({
   onCopyLink,
   onShowDetail,
   isLiked,
+  onSetFolderPoster,
+  isFolderPoster,
+  folderPosterUpdating,
 }: {
   onDownload: () => void;
   onDelete: () => void;
@@ -66,6 +73,9 @@ function FileActions({
   onCopyLink: () => void;
   onShowDetail: () => void;
   isLiked: boolean;
+  onSetFolderPoster?: () => void;
+  isFolderPoster?: boolean;
+  folderPosterUpdating?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1">
@@ -130,6 +140,21 @@ function FileActions({
             <Edit className="h-4 w-4 mr-2" />
             Edit
           </DropdownMenuItem>
+
+          {onSetFolderPoster && (
+            <DropdownMenuItem
+              onClick={onSetFolderPoster}
+              disabled={isFolderPoster || folderPosterUpdating}
+              className="text-white hover:bg-white/10"
+            >
+              {folderPosterUpdating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ImageIcon className="mr-2 h-4 w-4 text-emerald-300" />
+              )}
+              {isFolderPoster ? "Album poster" : "Set as album poster"}
+            </DropdownMenuItem>
+          )}
 
           {/* 下载 */}
           <DropdownMenuItem
@@ -213,8 +238,14 @@ export function FileContent({
   return <FileText className={`${ICON_DISPLAY_SIZE} text-amber-300`} />;
 }
 
-export function FileCard({ file, listView = false }: FileCardProps) {
-  const {selectedKeys, toggleSelection, deleteFilesLocal, updateFileMetadata, safeMode, imageLoadMode} = useFileStore();
+export function FileCard({
+  file,
+  listView = false,
+  isFolderPoster = false,
+  onSetFolderPoster,
+  folderPosterUpdating = false,
+}: FileCardProps) {
+  const {selectedKeys, toggleSelection, deleteFilesLocal, updateFileMetadata, fetchFolders, safeMode, imageLoadMode} = useFileStore();
   const [showDetail, setShowDetail] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
@@ -238,11 +269,24 @@ export function FileCard({ file, listView = false }: FileCardProps) {
     toggleSelection(file.name);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!confirm(`确定删除文件 ${file.metadata.fileName} ?`)) return;
-    deleteFile(file.name).then(() => {
-      deleteFilesLocal([file.name]);
-    });
+
+    try {
+      await deleteFile(file.name);
+    } catch (error) {
+      toast({
+        title: "删除失败",
+        description: error instanceof Error ? error.message : "请稍后重试",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    deleteFilesLocal([file.name]);
+    if (fileType === FileType.Image) {
+      fetchFolders(true).catch((error) => console.error("Unable to refresh albums:", error));
+    }
   };
 
   const handleCopyLink = () => {
@@ -459,6 +503,9 @@ export function FileCard({ file, listView = false }: FileCardProps) {
             onCopyLink={handleCopyLink}
             onShowDetail={() => setShowDetail(true)}
             isLiked={file.metadata?.liked || false}
+            onSetFolderPoster={onSetFolderPoster}
+            isFolderPoster={isFolderPoster}
+            folderPosterUpdating={folderPosterUpdating}
           />
         </div>
         <FileDetailDialog
@@ -501,6 +548,12 @@ export function FileCard({ file, listView = false }: FileCardProps) {
             </div>
           </div>
 
+          {isFolderPoster && (
+            <div className="absolute left-12 top-3 z-10 flex items-center gap-1 rounded-full border border-emerald-300/30 bg-black/55 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-100 backdrop-blur">
+              <ImageIcon className="h-3 w-3" /> Poster
+            </div>
+          )}
+
           {/* Actions Menu */}
           <div className="absolute top-3 right-3 z-10">
             <FileActions
@@ -512,6 +565,9 @@ export function FileCard({ file, listView = false }: FileCardProps) {
               onCopyLink={handleCopyLink}
               onShowDetail={() => setShowDetail(true)}
               isLiked={file.metadata?.liked || false}
+              onSetFolderPoster={onSetFolderPoster}
+              isFolderPoster={isFolderPoster}
+              folderPosterUpdating={folderPosterUpdating}
             />
           </div>
 

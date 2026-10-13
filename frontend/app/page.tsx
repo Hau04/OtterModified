@@ -8,11 +8,13 @@ import { FileGrid } from "@/components/file-grid"
 import { BatchOperationsBar } from "@/components/batch-operations-bar"
 import { EmptyState } from "@/components/empty-state"
 import { useActiveItems, useFileStore } from "@/lib/file-store"
+import { FileType } from "@/lib/types"
 
 export default function OtterHubPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   const activeItems = useActiveItems()
+  const activeType = useFileStore((state) => state.activeType)
   const selectedKeys = useFileStore((state) => state.selectedKeys)
   const fetchNextPage = useFileStore((state) => state.fetchNextPage)
 
@@ -45,7 +47,7 @@ export default function OtterHubPage() {
           <main className="flex-1 overflow-auto p-6 md:p-8">
             <FileUploadZone />
 
-            {activeItems.length === 0 ? <EmptyState /> : <FileGrid />}
+            {activeItems.length === 0 && activeType !== FileType.Image ? <EmptyState /> : <FileGrid />}
           </main>
         </div>
 
