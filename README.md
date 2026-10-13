@@ -6,7 +6,7 @@
 <p align="center"><strong>Stash your files like an otter</strong></p>
 
 <p align="center">
-  基于 Cloudflare Worker 的私人云盘，并提供 FastAPI + SQLite 的 Python VPS 部署模式
+  基于 Cloudflare Worker 的私人云盘，并提供 Express + SQLite 的 Node.js VPS 部署模式
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@
 OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
 - **Cloudflare 模式**：Cloudflare Pages + KV，使用 Telegram Bot 作为实际文件存储
-- **Python VPS 模式**：FastAPI + SQLite，文件与上传分片存储在 VPS 本地磁盘
+- **Node.js VPS 模式**：Express + SQLite，文件与上传分片存储在 VPS 本地磁盘
 - 两种模式均保留 **分片上传** 和 **HTTP Range**，支持视频与大文件访问
 - 架构克制、状态最小化，优先长期可维护性
 
@@ -56,7 +56,7 @@ OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
 - **私人文件存储**：
   - 支持图片 / 音频 / 视频 / 文档
-  - Cloudflare 模式使用按类型划分的 KV Key (`img:` / `audio:` / `video:` / `doc:`)；Python 模式使用 SQLite 元数据
+  - Cloudflare 模式使用按类型划分的 KV Key (`img:` / `audio:` / `video:` / `doc:`)；Node.js VPS 模式使用 SQLite 元数据
 - **大文件支持**：
   - 分片上传（≤20MB/片），已实测稳定上传并预览 **100MB** 文件，理论最大 1GB
   - 支持 HTTP Range，视频/音频按需加载，支持断点续传
@@ -78,7 +78,7 @@ OtterHub 是一个 **为个人使用场景定制** 的私人云盘方案：
 
 ### 前置要求
 
-- Node.js 18+
+- Node.js 20.9+ for the frontend; Node.js 22+ for the VPS backend
 - Cloudflare 账号（免费）
 - Telegram Bot Token
 
@@ -116,44 +116,64 @@ npm start
 
 ---
 
-## 🐍 Python VPS deployment (Cloudflare alternative)
+## 🟢 Node.js VPS deployment (Cloudflare alternative)
 
-This repository also includes a standalone **FastAPI + SQLite** backend in `backend/`. It serves the exported Next.js frontend from the same origin and stores metadata, files, and temporary upload chunks on the VPS disk. It does not require Cloudflare Workers, KV, R2, or Telegram. The existing Cloudflare Worker implementation remains available in `functions/`.
+The standalone **Express + SQLite** backend in `node-vps/` serves the exported Next.js frontend and stores metadata, files, and upload chunks on the VPS disk. It does not require Cloudflare Workers, KV, R2, or Telegram. The existing Cloudflare Worker remains available in `functions/`.
 
-> **Data migration:** switching to the Python backend starts a separate, empty SQLite/local-filesystem store. Files and metadata currently held in Cloudflare KV, R2, or Telegram are **not copied automatically**; export/import them separately before switching if you need to preserve them.
+> **Data migration:** the Node.js VPS backend uses a separate SQLite/local-filesystem store. Existing files and metadata in Cloudflare KV, R2, or Telegram are **not copied automatically**; export/import them separately if you need to preserve them.
 
 ### Run locally
 
-Build the static frontend first, then start FastAPI from the `backend/` directory:
+Use Node.js 22 or later. Build the static frontend, then start the Node API:
 
 ```bash
 cd frontend
 npm ci
 npm run build
 
-cd ../backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-APP_ENV=development DATA_DIR=./data FRONTEND_DIR=../frontend/out \
-  uvicorn app.main:app --host 0.0.0.0 --port 8000
+cd ../node-vps
+npm ci
+cp .env.example .env
 ```
 
-Open `http://localhost:8000`. For local Basic Auth, set both `BASIC_USER` and `BASIC_PASS` before starting the service. The production environment template is [`backend/.env.example`](backend/.env.example); production startup rejects its placeholder credentials until you replace them.
+For local use, edit `node-vps/.env` to use development credentials and paths (all paths are relative to `node-vps/`):
+
+```env
+APP_ENV=development
+BASIC_USER=
+BASIC_PASS=
+DATA_DIR=./data
+DATABASE_PATH=./data/otterhub.sqlite3
+STORAGE_DIR=./data/files
+CHUNKS_DIR=./data/chunks
+TEMP_UPLOAD_DIR=./data/uploads
+FRONTEND_DIR=../frontend/out
+```
+
+Then run:
+
+```bash
+npm test
+npm start
+```
+
+Open `http://localhost:8000`.
 
 ### Prepare an Ubuntu/Debian VPS (one time)
 
-Use Python 3.12 (recommended), Nginx, and enough persistent disk for your files plus backups. Run the initial setup from a checkout of this repository on the VPS. Replace `DEPLOY_USER` below with the SSH account that GitHub Actions will use:
+Install **Node.js 22 LTS and npm** system-wide (the systemd unit expects `/usr/bin/node`) and Nginx. The SQLite package uses a prebuilt binary on supported Node 22/Linux platforms; if npm must compile it from source, install the native build toolchain required by your distribution. Keep enough persistent disk for your files and backups. Run the initial setup from a repository checkout on the VPS and replace `DEPLOY_USER` with the SSH account GitHub Actions will use:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv nginx curl
+sudo apt install -y nginx curl
+node --version  # must be 22 or newer
+npm --version
 sudo useradd --system --home-dir /var/lib/otterhub --create-home \
   --shell /usr/sbin/nologin otterhub
 sudo install -d -o otterhub -g otterhub -m 0750 /var/lib/otterhub
 sudo install -d -o "$USER" -g otterhub -m 0755 \
   /opt/otterhub/releases /opt/otterhub/shared
-sudo cp backend/.env.example /opt/otterhub/shared/otterhub.env
+sudo cp node-vps/.env.example /opt/otterhub/shared/otterhub.env
 sudoedit /opt/otterhub/shared/otterhub.env
 sudo chown root:otterhub /opt/otterhub/shared/otterhub.env
 sudo chmod 640 /opt/otterhub/shared/otterhub.env
@@ -166,9 +186,9 @@ sudo systemctl enable otterhub
 # Do not start it yet: the first release creates /opt/otterhub/current.
 ```
 
-In `otterhub.env`, set a unique `BASIC_USER` and `BASIC_PASS`, and keep the persistent data paths under `/var/lib/otterhub`. Generate a password made of hex characters (for example, `openssl rand -hex 32`) to avoid environment-file quoting surprises. The service reads the shared environment file; do not put secrets in the release archive or Git.
+In `otterhub.env`, set `APP_ENV=production`, `NODE_ENV=production`, a unique `BASIC_USER` and `BASIC_PASS`, and keep data paths under `/var/lib/otterhub`. Generate a hex password (for example, `openssl rand -hex 32`) to avoid environment-file quoting issues. The service reads this shared file; do not commit secrets or put them in the release archive.
 
-Make sure the SSH deploy account owns `/opt/otterhub` and can traverse/read the release directories. Give it only the required passwordless systemd commands, adjusting the systemctl path if needed:
+Make sure the SSH deploy account owns `/opt/otterhub` and can traverse/read release directories. Give it only the required passwordless systemd commands, adjusting the systemctl path if needed:
 
 ```bash
 sudo visudo -f /etc/sudoers.d/otterhub-deploy
@@ -176,7 +196,7 @@ sudo visudo -f /etc/sudoers.d/otterhub-deploy
 DEPLOY_USER ALL=(root) NOPASSWD: /usr/bin/systemctl cat otterhub, /usr/bin/systemctl restart otterhub, /usr/bin/systemctl stop otterhub
 ```
 
-Configure Nginx from [`deploy/nginx.conf.example`](deploy/nginx.conf.example): set your domain, enable the site, obtain a TLS certificate (for example with Certbot), and serve the app only over HTTPS. The example permits 25 MB HTTP request bodies for 20 MiB chunks; keep this in sync with the frontend chunk size. The app listens on `127.0.0.1:8000` and should not be exposed directly to the public internet.
+Configure Nginx from [`deploy/nginx.conf.example`](deploy/nginx.conf.example): set your domain, enable the site, obtain a TLS certificate (for example with Certbot), and serve the app only over HTTPS. The example allows 25 MiB request bodies for 20 MiB chunks. Node listens on `127.0.0.1:8000` and should not be exposed directly to the public internet.
 
 ### Configure GitHub Actions and release
 
@@ -188,9 +208,9 @@ Add these repository **Actions secrets** before deploying:
 - `VPS_SSH_PRIVATE_KEY` — private key matching that account's `authorized_keys`
 - `VPS_KNOWN_HOSTS` — verified SSH host-key line(s) for the VPS
 
-The workflow [`.github/workflows/python-vps-release.yml`](.github/workflows/python-vps-release.yml) runs the Python API tests, TypeScript check, and static frontend build; it packages and publishes a GitHub Release. Push a version tag (for example `v1.0.0`) to publish **and deploy** it. You can instead run **Actions → Python VPS release → Run workflow**, enter a version, and choose whether to deploy. Deployments use a versioned Python virtual environment, keep the current and previous releases for rollback, and roll the `current` symlink back if the service health check fails.
+The workflow [`.github/workflows/node-vps-release.yml`](.github/workflows/node-vps-release.yml) tests the Node API, checks/builds the frontend, and publishes a GitHub Release. Push a version tag such as `v1.0.0` to publish **and deploy** it. Or run **Actions → Node.js VPS release → Run workflow**, enter a version, and choose whether to deploy. Deployments keep the current and previous releases and restore the previous symlink if the health check fails.
 
-Back up `/var/lib/otterhub` (SQLite database and uploaded files) together. For a simple consistent snapshot, stop `otterhub`, archive that directory, then start the service again. The Worker and VPS datasets are independent; deploying this workflow does not delete or alter Cloudflare data.
+Back up `/var/lib/otterhub` (SQLite database and uploaded files) together. For a consistent snapshot, stop `otterhub`, archive that directory, then start the service again. The Worker and VPS datasets are independent; deploying the Node VPS workflow does not delete or alter Cloudflare data.
 
 ---
 
@@ -373,9 +393,9 @@ TG_BOT_TOKEN=your_tg_bot_token  # Telegram Bot Token
 
 ```
 OtterHub/
-├── backend/          # Python FastAPI + SQLite backend for VPS deployment
-├── deploy/           # systemd and Nginx examples for the Python backend
-├── .github/workflows/python-vps-release.yml
+├── node-vps/         # Express + SQLite backend for Node.js VPS deployment
+├── deploy/           # systemd and Nginx examples for the VPS backend
+├── .github/workflows/node-vps-release.yml
 ├── frontend/
 ├── functions/         # Cloudflare Pages Functions
 │   ├── api/

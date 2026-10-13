@@ -2,9 +2,9 @@ name: CI Test
 
 on:
   pull_request:
-    branches: [ master ]
+    branches: [ master, demo ]
   push:
-    branches: [ master ]
+    branches: [ master, demo ]
 
 jobs:
   setup:
@@ -30,5 +30,25 @@ jobs:
         run: npm install
       - name: Build frontend
         run: npm run build:frontend
+      - name: Check frontend types
+        working-directory: frontend
+        run: npx tsc --noEmit
       - name: Run CI tests
         run: npm run ci-test
+
+  node-vps:
+    name: Node.js VPS API tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: node-vps/package-lock.json
+      - name: Install and test Node VPS backend
+        working-directory: node-vps
+        run: |
+          npm ci
+          npm test

@@ -1,0 +1,24 @@
+{
+  "name": "otterhub-node-vps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OtterHub API and local storage backend for a Node.js VPS",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.7",
+    "express": "^4.22.3",
+    "mime-types": "^3.0.2",
+    "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
+  }
+}

@@ -106,6 +106,6 @@ export const MAX_CHUNK_SIZE = 20 * 1024 * 1024 // 20MB
 // Cloudflare Worker免费版限制: https://developers.cloudflare.com/workers/platform/limits/#worker-limits
 // 最大128MB内存, 因此在下载大文件后，再次下载可能会报错
 export const DIRECT_DOWNLOAD_LIMIT = MAX_CHUNK_SIZE * 2 // 小的媒体文件可通过a.click直接下载，超过则让用户通过浏览器控件下载
-export const MAX_CHUNK_NUM = 50 // Python VPS upload limit: 50 x 20 MB chunks
+export const MAX_CHUNK_NUM = 50 // VPS upload limit: 50 x 20 MB chunks
 export const MAX_FILE_SIZE = MAX_CHUNK_SIZE * MAX_CHUNK_NUM
 

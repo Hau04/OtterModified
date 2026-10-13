@@ -1,1 +1,0 @@
-"""OtterHub Python backend."""
