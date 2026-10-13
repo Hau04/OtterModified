@@ -28,6 +28,7 @@ export function AddPhotosToFolderDialog({
   const fetchFolders = useFileStore((state) => state.fetchFolders);
   const updateFolderLocal = useFileStore((state) => state.updateFolderLocal);
   const updateFileMetadata = useFileStore((state) => state.updateFileMetadata);
+  const refreshAlbumFiles = useFileStore((state) => state.refreshAlbumFiles);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -98,7 +99,10 @@ export function AddPhotosToFolderDialog({
           const updatedFolder = await updatePhotoFolder(folder.id, {
             coverKey: movedFiles[0].name,
           });
-          updateFolderLocal(folder.id, updatedFolder);
+          updateFolderLocal(folder.id, {
+            ...updatedFolder,
+            coverTags: Array.isArray(movedFiles[0].metadata.tags) ? movedFiles[0].metadata.tags : [],
+          });
         } catch (error) {
           console.error("Unable to set the initial album poster:", error);
         }
@@ -109,6 +113,7 @@ export function AddPhotosToFolderDialog({
       });
 
       if (movedFiles.length > 0) {
+        refreshAlbumFiles();
         onOpenChange(false);
         toast({
           title: failedCount ? "Some photos weren't added" : "Photos added",

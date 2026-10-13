@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Folder,
@@ -22,7 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
-import { deletePhotoFolder, getFileUrl, updatePhotoFolder } from "@/lib/api";
+import { deletePhotoFolder, getAlbumFiles, getFileUrl, updatePhotoFolder } from "@/lib/api";
 import { useFileStore } from "@/lib/file-store";
 import { FileItem, PhotoFolder } from "@/lib/types";
 import { shouldBlur } from "@/lib/file-preview";
@@ -35,7 +35,6 @@ interface PhotoFolderBrowserProps {
 function PhotoFolderCard({
   folder,
   cover,
-  count,
   safeMode,
   onOpen,
   onRename,
@@ -43,23 +42,23 @@ function PhotoFolderCard({
 }: {
   folder: PhotoFolder;
   cover: FileItem | undefined;
-  count: number;
   safeMode: boolean;
   onOpen: () => void;
   onRename: () => void;
   onDelete: () => void;
 }) {
-  const coverIsBlurred = cover
-    ? shouldBlur({ safeMode, tags: cover.metadata?.tags })
-    : false;
+  const coverIsBlurred = shouldBlur({
+    safeMode,
+    tags: cover?.metadata?.tags ?? folder.coverTags,
+  });
 
   return (
     <div className="group relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 transition-all hover:-translate-y-1 hover:border-emerald-300/40 hover:bg-white/10">
       <button type="button" onClick={onOpen} className="block w-full text-left">
         <div className="relative aspect-[4/3] overflow-hidden bg-linear-to-br from-emerald-500/20 via-teal-500/10 to-blue-500/20">
-          {cover ? (
+          {folder.coverKey ? (
             <img
-              src={getFileUrl(cover.name)}
+              src={getFileUrl(folder.coverKey)}
               alt=""
               loading="lazy"
               className={cn(
@@ -89,9 +88,7 @@ function PhotoFolderCard({
         <div className="flex items-center justify-between gap-3 p-4">
           <div className="min-w-0">
             <h3 className="truncate text-base font-semibold text-white">{folder.name}</h3>
-            <p className="mt-1 text-xs text-white/50">
-              {count} {count === 1 ? "photo" : "photos"}
-            </p>
+            <p className="mt-1 text-xs text-white/50">Open to browse photos and videos</p>
           </div>
           <Folder className="h-5 w-5 shrink-0 text-emerald-300/80" />
         </div>
@@ -131,9 +128,16 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
   const removeFolderLocal = useFileStore((state) => state.removeFolderLocal);
   const updateFileMetadata = useFileStore((state) => state.updateFileMetadata);
   const foldersLoading = useFileStore((state) => state.foldersLoading);
+  const setUploadAlbumId = useFileStore((state) => state.setUploadAlbumId);
+  const albumRefreshVersion = useFileStore((state) => state.albumRefreshVersion);
   const safeMode = useFileStore((state) => state.safeMode);
   const searchQuery = useFileStore((state) => state.searchQuery);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [albumFiles, setAlbumFiles] = useState<FileItem[]>([]);
+  const [albumCursor, setAlbumCursor] = useState<string | null>(null);
+  const [albumHasMore, setAlbumHasMore] = useState(false);
+  const [albumLoading, setAlbumLoading] = useState(false);
+  const albumRequestId = useRef(0);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [editingFolder, setEditingFolder] = useState<PhotoFolder | null>(null);
   const [addPhotosOpen, setAddPhotosOpen] = useState(false);
@@ -151,31 +155,54 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
     });
   }, [fetchFolders, toast]);
 
+  useEffect(() => {
+    const requestId = ++albumRequestId.current;
+    if (!activeFolderId) {
+      setAlbumFiles([]);
+      setAlbumCursor(null);
+      setAlbumHasMore(false);
+      setAlbumLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAlbumFiles([]);
+    setAlbumCursor(null);
+    setAlbumHasMore(false);
+    setAlbumLoading(true);
+    getAlbumFiles(activeFolderId)
+      .then((result) => {
+        if (cancelled || albumRequestId.current !== requestId) return;
+        setAlbumFiles(result.keys);
+        setAlbumCursor(result.cursor ?? null);
+        setAlbumHasMore(!result.list_complete);
+      })
+      .catch((error) => {
+        if (cancelled || albumRequestId.current !== requestId) return;
+        toast({
+          title: "Couldn't load album media",
+          description: error instanceof Error ? error.message : "Please try again.",
+          variant: "destructive",
+        });
+      })
+      .finally(() => {
+        if (!cancelled && albumRequestId.current === requestId) setAlbumLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [activeFolderId, albumRefreshVersion, toast]);
+
   const query = searchQuery.trim().toLowerCase();
-  const albumPhotos = useMemo(() => {
-    const queryText = searchQuery.trim().toLowerCase();
-    return files.filter((file) => {
-      if (!queryText) return true;
-      return (file.metadata.fileName || file.name).toLowerCase().includes(queryText);
-    });
-  }, [files, searchQuery]);
-
-  const getFolderFiles = (folderId: string) =>
-    files
-      .filter((file) => file.metadata.folderId === folderId)
-      .sort((a, b) => (b.metadata.uploadedAt ?? 0) - (a.metadata.uploadedAt ?? 0));
-
-  const visibleFolders = folders.filter((folder) => {
-    if (!query || folder.name.toLowerCase().includes(query)) return true;
-    return getFolderFiles(folder.id).some((file) =>
+  const visibleFolders = folders.filter((folder) =>
+    !query || folder.name.toLowerCase().includes(query),
+  );
+  const activeFolder = folders.find((folder) => folder.id === activeFolderId) ?? null;
+  const activeFolderFiles = useMemo(() => {
+    if (!query) return albumFiles;
+    return albumFiles.filter((file) =>
       (file.metadata.fileName || file.name).toLowerCase().includes(query),
     );
-  });
-
-  const activeFolder = folders.find((folder) => folder.id === activeFolderId) ?? null;
-  const activeFolderFiles = activeFolder
-    ? getFolderFiles(activeFolder.id).filter((file) => albumPhotos.includes(file))
-    : [];
+  }, [albumFiles, query]);
 
   const openCreateDialog = () => {
     setEditingFolder(null);
@@ -188,8 +215,40 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
   };
 
   const handleFolderSaved = (folder: PhotoFolder) => {
-    if (editingFolder) updateFolderLocal(folder.id, folder);
-    else addFolderLocal(folder);
+    if (editingFolder) {
+      updateFolderLocal(folder.id, { ...folder, coverTags: editingFolder.coverTags });
+    } else {
+      addFolderLocal(folder);
+      // Make the album just created the destination for the next upload.
+      setUploadAlbumId(folder.id);
+    }
+  };
+
+  const loadMoreAlbumFiles = async () => {
+    if (!activeFolderId || !albumCursor || albumLoading) return;
+    const requestId = albumRequestId.current;
+    setAlbumLoading(true);
+    try {
+      const result = await getAlbumFiles(activeFolderId, albumCursor);
+      if (albumRequestId.current !== requestId) return;
+      setAlbumFiles((current) => {
+        const merged = new Map(current.map((file) => [file.name, file]));
+        for (const file of result.keys) merged.set(file.name, file);
+        return [...merged.values()];
+      });
+      setAlbumCursor(result.cursor ?? null);
+      setAlbumHasMore(!result.list_complete);
+    } catch (error) {
+      if (albumRequestId.current === requestId) {
+        toast({
+          title: "Couldn't load more media",
+          description: error instanceof Error ? error.message : "Please try again.",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      if (albumRequestId.current === requestId) setAlbumLoading(false);
+    }
   };
 
   const handleDeleteFolder = async (folder: PhotoFolder) => {
@@ -200,15 +259,17 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
 
     try {
       const result = await deletePhotoFolder(folder.id);
+      const loadedFiles = new Map([...files, ...albumFiles].map((file) => [file.name, file]));
       result.detachedKeys.forEach((key) => {
-        const file = files.find((item) => item.name === key);
+        const file = loadedFiles.get(key);
         if (!file) return;
         const { folderId: _folderId, ...metadata } = file.metadata;
         updateFileMetadata(key, metadata);
       });
       removeFolderLocal(folder.id);
+      if (useFileStore.getState().uploadAlbumId === folder.id) setUploadAlbumId("");
       if (activeFolderId === folder.id) setActiveFolderId(null);
-      toast({ title: "Album deleted", description: "Your photos were kept in the library." });
+      toast({ title: "Album deleted", description: "Its photos and videos remain in your library." });
     } catch (error) {
       toast({
         title: "Couldn't delete album",
@@ -224,7 +285,10 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
     setUpdatingPosterKey(file.name);
     try {
       const updatedFolder = await updatePhotoFolder(activeFolder.id, { coverKey: file.name });
-      updateFolderLocal(activeFolder.id, updatedFolder);
+      updateFolderLocal(activeFolder.id, {
+        ...updatedFolder,
+        coverTags: Array.isArray(file.metadata.tags) ? file.metadata.tags : [],
+      });
       toast({ title: "Album poster updated" });
     } catch (error) {
       toast({
@@ -255,8 +319,8 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
               <div className="min-w-0">
                 <h2 className="truncate text-2xl font-semibold text-white">{activeFolder.name}</h2>
                 <p className="mt-1 text-sm text-white/50">
-                  {activeFolderFiles.length} {activeFolderFiles.length === 1 ? "photo" : "photos"}
-                  {query ? " matching your search" : " · Click a photo to preview; use its menu to set the poster"}
+                  {activeFolderFiles.length}{albumHasMore ? "+" : ""} media items loaded
+                  {query ? " matching your search" : " · Photos and videos are both supported"}
                 </p>
               </div>
             </div>
@@ -275,37 +339,59 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
               onClick={() => setAddPhotosOpen(true)}
               className="bg-emerald-500 text-white hover:bg-emerald-600"
             >
-              <ImagePlus className="mr-2 h-4 w-4" /> Add photos
+              <ImagePlus className="mr-2 h-4 w-4" /> Add existing photos
             </Button>
           </div>
         </div>
 
-        {activeFolderFiles.length > 0 ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {activeFolderFiles.map((file) => (
-              <FileCard
-                key={file.name}
-                file={file}
-                isFolderPoster={activeFolder.coverKey === file.name}
-                onSetFolderPoster={() => handleSetPoster(file)}
-                folderPosterUpdating={updatingPosterKey === file.name}
-              />
-            ))}
+        {albumLoading && albumFiles.length === 0 ? (
+          <div className="flex min-h-64 items-center justify-center">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
           </div>
+        ) : activeFolderFiles.length > 0 ? (
+          <>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {activeFolderFiles.map((file) => {
+                const isImage = file.name.startsWith("img:");
+                return (
+                  <FileCard
+                    key={file.name}
+                    file={file}
+                    isFolderPoster={isImage && activeFolder.coverKey === file.name}
+                    onSetFolderPoster={isImage ? () => handleSetPoster(file) : undefined}
+                    folderPosterUpdating={updatingPosterKey === file.name}
+                  />
+                );
+              })}
+            </div>
+            {albumHasMore && (
+              <div className="flex justify-center">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={albumLoading}
+                  onClick={loadMoreAlbumFiles}
+                  className="border-white/20 text-white hover:bg-white/10"
+                >
+                  {albumLoading ? "Loading…" : "Load more media"}
+                </Button>
+              </div>
+            )}
+          </>
         ) : (
           <div className="flex min-h-64 flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 bg-white/[0.03] px-6 text-center">
             <ImagePlus className="mb-4 h-10 w-10 text-emerald-300/70" />
             <h3 className="text-lg font-medium text-white">
-              {query ? "No photos match your search" : "This album is empty"}
+              {query ? "No media matches your search" : "This album is empty"}
             </h3>
             <p className="mt-2 max-w-md text-sm text-white/50">
               {query
-                ? "Try another search, or clear the search field to see all album photos."
-                : "Add photos from your library, or choose this album in the upload area to save new photos here."}
+                ? "Try another search, or clear the search field to see all album media."
+                : "Choose this album in the upload area, then add photos and videos."}
             </p>
             {!query && (
               <Button onClick={() => setAddPhotosOpen(true)} className="mt-5 bg-emerald-500 text-white hover:bg-emerald-600">
-                <ImagePlus className="mr-2 h-4 w-4" /> Add photos
+                <ImagePlus className="mr-2 h-4 w-4" /> Add existing photos
               </Button>
             )}
           </div>
@@ -331,9 +417,9 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">Your photo albums</h2>
+          <h2 className="text-xl font-semibold text-white">Your albums</h2>
           <p className="mt-1 text-sm text-white/50">
-            Keep related photos together, choose a poster, and open an album to browse its gallery.
+            Create and name an album first, then select it before uploading photos or videos.
           </p>
         </div>
         <Button onClick={openCreateDialog} className="bg-emerald-500 text-white hover:bg-emerald-600">
@@ -344,17 +430,18 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
       {visibleFolders.length > 0 ? (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {visibleFolders.map((folder) => {
-            const folderFiles = getFolderFiles(folder.id);
-            const cover = folderFiles.find((file) => file.name === folder.coverKey) ?? folderFiles[0];
+            const cover = files.find((file) => file.name === folder.coverKey);
 
             return (
               <PhotoFolderCard
                 key={folder.id}
                 folder={folder}
                 cover={cover}
-                count={folderFiles.length}
                 safeMode={safeMode}
-                onOpen={() => setActiveFolderId(folder.id)}
+                onOpen={() => {
+                  setUploadAlbumId(folder.id);
+                  setActiveFolderId(folder.id);
+                }}
                 onRename={() => openRenameDialog(folder)}
                 onDelete={() => handleDeleteFolder(folder)}
               />
@@ -369,12 +456,12 @@ export function PhotoFolderBrowser({ files }: PhotoFolderBrowserProps) {
             <FolderOpen className="mb-4 h-12 w-12 text-emerald-300/70" />
           )}
           <h3 className="text-lg font-medium text-white">
-            {query ? "No albums match your search" : "No photo albums yet"}
+            {query ? "No albums match your search" : "No albums yet"}
           </h3>
           <p className="mt-2 max-w-md text-sm text-white/50">
             {query
               ? "Try another search or clear the search field."
-              : "Create an album, then add existing photos or choose it as the destination when uploading."}
+              : "Create and name an album first. It will be selected for your next photo or video upload."}
           </p>
           {!query && (
             <Button onClick={openCreateDialog} className="mt-5 bg-emerald-500 text-white hover:bg-emerald-600">

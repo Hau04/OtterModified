@@ -3,6 +3,7 @@ import { Chunk, chunkPrefix, FileMetadata, TEMP_CHUNK_TTL } from "../types";
 import { fail, ok } from "../common";
 import { isUploadedChunk, streamToBlob } from "./shared-utils";
 import { getUniqueFileId } from "../file";
+import { addFileToAlbum } from "../photo-folders";
 
 /**
  * 存储适配器基类
@@ -150,6 +151,12 @@ export abstract class BaseAdapter implements DBAdapter {
     // 2. 检查分片是否已上传（使用通用工具函数）
     const isUploaded = isUploadedChunk(metadata, chunkIndex);
     if (isUploaded) {
+      if (
+        metadata.folderId &&
+        metadata.chunkInfo.uploadedIndices?.length === metadata.chunkInfo.total
+      ) {
+        await addFileToAlbum(kv, metadata.folderId, key);
+      }
       return ok(chunkIndex);
     }
 
@@ -267,6 +274,12 @@ export abstract class BaseAdapter implements DBAdapter {
 
         // 5. 写回 KV
         await kv.put(key, JSON.stringify(chunks), { metadata });
+        if (
+          metadata.folderId &&
+          metadata.chunkInfo.uploadedIndices.length === metadata.chunkInfo.total
+        ) {
+          await addFileToAlbum(kv, metadata.folderId, key);
+        }
 
         console.log(
           `[updateChunkInfo] Updated chunk ${chunkIndex} (attempt ${i + 1})`,

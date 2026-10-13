@@ -63,6 +63,8 @@ interface FileStore {
   folders: PhotoFolder[];
   foldersLoading: boolean;
   foldersLoaded: boolean;
+  uploadAlbumId: string;
+  albumRefreshVersion: number;
 
   // actions
   setActiveType: (type: FileType) => Promise<void>;
@@ -74,6 +76,8 @@ interface FileStore {
   setSafeMode: (enabled: boolean) => void;
   setImageLoadMode: (mode: ImageLoadMode) => void;
   fetchFolders: (force?: boolean) => Promise<void>;
+  setUploadAlbumId: (id: string) => void;
+  refreshAlbumFiles: () => void;
   addFolderLocal: (folder: PhotoFolder) => void;
   updateFolderLocal: (id: string, updates: Partial<PhotoFolder>) => void;
   removeFolderLocal: (id: string) => void;
@@ -113,6 +117,8 @@ export const useFileStore = create<FileStore>((set, get) => ({
   folders: [],
   foldersLoading: false,
   foldersLoaded: false,
+  uploadAlbumId: "",
+  albumRefreshVersion: 0,
 
   setActiveType: async (type) => {
     const { activeType, viewMode } = get();
@@ -221,6 +227,11 @@ export const useFileStore = create<FileStore>((set, get) => ({
       throw error;
     }
   },
+
+  setUploadAlbumId: (id) => set({ uploadAlbumId: id }),
+
+  refreshAlbumFiles: () =>
+    set((state) => ({ albumRefreshVersion: state.albumRefreshVersion + 1 })),
 
   addFolderLocal: (folder) =>
     set((state) => ({

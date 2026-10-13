@@ -1,6 +1,6 @@
 // functions/api/list.ts
-import { CF } from "../utils/types";
 import { ok, fail } from "../utils/common";
+import { getKVBinding } from "../utils/cloudflare-bindings";
 
 const listLimit = 100
 // https://developers.cloudflare.com/kv/api/list-keys/
@@ -23,7 +23,7 @@ export async function onRequestGet(context: any) {
 
     console.log("List options:", options);
     
-    const value = await env[CF.KV_NAME].list(options);
+    const value = await getKVBinding(env).list(options);
 
     /*
     {

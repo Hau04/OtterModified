@@ -2,7 +2,7 @@
   "name": "otterhub-node-vps",
   "version": "1.0.0",
   "private": true,
-  "description": "OtterHub API and local storage backend for a Node.js VPS",
+  "description": "OtterHub Node.js API with Telegram or local media storage",
   "engines": {
     "node": ">=18"
   },

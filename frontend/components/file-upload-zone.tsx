@@ -67,7 +67,9 @@ export function FileUploadZone() {
   const updateFileMetadata = useFileStore((state) => state.updateFileMetadata)
   const folders = useFileStore((state) => state.folders)
   const fetchFolders = useFileStore((state) => state.fetchFolders)
-  const [targetFolderId, setTargetFolderId] = useState("")
+  const targetFolderId = useFileStore((state) => state.uploadAlbumId)
+  const setTargetFolderId = useFileStore((state) => state.setUploadAlbumId)
+  const refreshAlbumFiles = useFileStore((state) => state.refreshAlbumFiles)
   const [isDragging, setIsDragging] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
   const [resumePrompt, setResumePrompt] = useState<{ file: File; existingFile: FileItem } | null>(null)
@@ -88,13 +90,6 @@ export function FileUploadZone() {
 
   const processFiles = useCallback(
     async (files: FileList, skipResumeCheck = false, resumeFile?: FileItem) => {
-      if (files.length > 5) {
-        toast({
-          title: "最多同时上传 5 个文件",
-          variant: "destructive",
-        })
-        return
-      }
       const fileArray = Array.from(files)
       if (!fileArray.length) return
 
@@ -129,7 +124,8 @@ export function FileUploadZone() {
           // 对图片文件进行 NSFW 检测, 非图片文件直接返回 false
           const isUnsafe = await nsfwDetector.isUnsafeImg(file)
           const fileType = getFileType(file.type)
-          const folderId = fileType === FileType.Image ? targetFolderId || undefined : undefined
+          const isAlbumMedia = fileType === FileType.Image || fileType === FileType.Video
+          const folderId = isAlbumMedia ? targetFolderId || undefined : undefined
           const key = await uploadFile(file, isUnsafe, folderId)
 
           uploadProgressMap[tmpKey] = 100
@@ -170,8 +166,12 @@ export function FileUploadZone() {
           const isUnsafe = resumeFile
             ? (resumeFile.metadata.tags ?? []).includes(FileTag.NSFW)
             : await nsfwDetector.isUnsafeImg(file)
-          const folderId = resumeFile?.metadata.folderId
-            ?? (fileType === FileType.Image ? targetFolderId || undefined : undefined)
+          const isAlbumMedia = fileType === FileType.Image || fileType === FileType.Video
+          // A resumed upload keeps its original destination; only new uploads
+          // inherit the currently selected album.
+          const folderId = resumeFile
+            ? resumeFile.metadata.folderId
+            : (isAlbumMedia ? targetFolderId || undefined : undefined)
 
           const key = resumeFile
             ? resumeFile.name
@@ -220,11 +220,8 @@ export function FileUploadZone() {
           }
 
           // 并发分批上传
-          await runBatches(
-            missingIndices,
-            MAX_CONCURRENTS,
-            uploadSingleChunk,
-          )
+          // Keep chunks for one file sequential so their KV progress writes can't race.
+          await runBatches(missingIndices, 1, uploadSingleChunk)
 
           return { key, fileType, isUnsafe, folderId }
         } catch (error) {
@@ -280,6 +277,10 @@ export function FileUploadZone() {
         await Promise.all(batch.map(uploadSingleFile))
       }
 
+      if (successCount > 0 && (targetFolderId || resumeFile?.metadata.folderId)) {
+        refreshAlbumFiles();
+      }
+
       // 显示上传结果
       if (successCount > 0) {
         toast({
@@ -296,7 +297,7 @@ export function FileUploadZone() {
         })
       }
     },
-    [addFileLocal, targetFolderId, toast, updateFileMetadata],
+    [addFileLocal, refreshAlbumFiles, targetFolderId, toast, updateFileMetadata],
   )
 
   const handleDrop = useCallback(
@@ -343,7 +344,7 @@ export function FileUploadZone() {
       <div className="mb-3 flex flex-wrap items-center justify-center gap-3 text-sm">
         <label htmlFor="upload-folder" className="flex items-center gap-2 text-white/70">
           <FolderOpen className="h-4 w-4 text-emerald-300" />
-          Save photos to album
+          Album for photos/videos
         </label>
         <select
           id="upload-folder"
@@ -351,7 +352,7 @@ export function FileUploadZone() {
           onChange={(event) => setTargetFolderId(event.target.value)}
           className="h-9 min-w-48 rounded-md border border-white/20 bg-[#0d2137] px-3 text-white outline-none focus:border-emerald-400"
         >
-          <option value="">Unfiled photos</option>
+          <option value="">Unfiled media</option>
           {folders.map((folder) => (
             <option key={folder.id} value={folder.id}>
               {folder.name}
@@ -359,7 +360,7 @@ export function FileUploadZone() {
           ))}
         </select>
         {folders.length === 0 && (
-          <span className="text-xs text-white/40">Create an album in the Albums tab first.</span>
+          <span className="text-xs text-white/40">Create an album first; it will be selected for uploads.</span>
         )}
       </div>
 

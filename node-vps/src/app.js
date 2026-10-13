@@ -8,6 +8,14 @@ const express = require('express');
 const cors = require('cors');
 const mime = require('mime-types');
 const multer = require('multer');
+const { Readable } = require('node:stream');
+const {
+  TELEGRAM_CHUNKS_PREFIX,
+  TELEGRAM_FILE_PREFIX,
+  TelegramStorage,
+  decodeTelegramChunks,
+  encodeTelegramChunks,
+} = require('./telegram-storage');
 const {
   FILE_TYPES,
   KEY_PATTERN,
@@ -142,18 +150,25 @@ function makeUploadMiddleware(config, maxFileSize) {
 }
 
 function createApp(config, options = {}) {
-  for (const directory of [
+  const requiredDirectories = [
     config.dataDir,
     path.dirname(config.databasePath),
-    config.storageDir,
-    config.chunksDir,
     config.tempUploadDir,
-  ]) {
-    fs.mkdirSync(directory, { recursive: true });
+  ];
+  if (config.storageBackend !== 'telegram') {
+    requiredDirectories.push(config.storageDir, config.chunksDir);
   }
+  for (const directory of requiredDirectories) fs.mkdirSync(directory, { recursive: true });
 
   const store = options.store;
   if (!store) throw new Error('createApp requires an initialized DatabaseStore');
+  const telegramStorage = config.storageBackend === 'telegram'
+    ? (options.telegramStorage || new TelegramStorage({
+      botToken: config.telegramBotToken,
+      chatId: config.telegramChatId,
+      timeoutMs: config.telegramTimeoutMs,
+    }))
+    : null;
   const app = express();
   app.disable('x-powered-by');
   app.locals.store = store;
@@ -303,7 +318,6 @@ function createApp(config, options = {}) {
       }
 
       const key = makeFileKey(fileType, filename);
-      const destination = resolveFilePath(config.storageDir, key);
       const metadata = {
         fileName: filename,
         fileSize: req.file.size,
@@ -313,12 +327,27 @@ function createApp(config, options = {}) {
       };
       if (folderId) metadata.folderId = folderId;
 
-      await moveFile(temporaryPath, destination);
-      try {
-        store.createFile(key, metadata, destination);
-      } catch (error) {
-        await fsp.rm(destination, { force: true });
-        throw error;
+      if (telegramStorage) {
+        const buffer = await fsp.readFile(temporaryPath);
+        let uploaded;
+        try {
+          uploaded = await telegramStorage.uploadFile(buffer, {
+            fileName: filename,
+            contentType: req.file.mimetype,
+          });
+        } catch (error) {
+          return apiFail(res, `Telegram upload failed: ${error.message}`, 502);
+        }
+        store.createFile(key, metadata, `${TELEGRAM_FILE_PREFIX}${uploaded.fileId}`);
+      } else {
+        const destination = resolveFilePath(config.storageDir, key);
+        await moveFile(temporaryPath, destination);
+        try {
+          store.createFile(key, metadata, destination);
+        } catch (error) {
+          await fsp.rm(destination, { force: true });
+          throw error;
+        }
       }
       return apiOk(res, key);
     } finally {
@@ -341,7 +370,7 @@ function createApp(config, options = {}) {
     ) {
       return apiFail(res, 'Invalid chunk upload parameters');
     }
-    if (fileSize > config.maxUploadSizeBytes) {
+    if (fileSize > config.maxUploadSizeBytes || totalChunks > config.maxChunkCount) {
       return apiFail(res, 'File exceeds the configured upload limit', 413);
     }
     if (totalChunks !== Math.ceil(fileSize / config.chunkSizeBytes)) {
@@ -364,7 +393,7 @@ function createApp(config, options = {}) {
       chunkInfo: { total: totalChunks, uploadedIndices: [] },
     };
     if (folderId) metadata.folderId = folderId;
-    store.createFile(key, metadata, null);
+    store.createFile(key, metadata, telegramStorage ? encodeTelegramChunks([]) : null);
     return apiOk(res, key);
   });
 
@@ -384,50 +413,98 @@ function createApp(config, options = {}) {
         const chunkInfo = metadata.chunkInfo;
         if (!chunkInfo) return apiFail(res, 'Not a chunked upload');
         if (chunkIndex < 0 || chunkIndex >= chunkInfo.total) return apiFail(res, 'Invalid chunk index');
-        if (file.storagePath) return apiOk(res, chunkIndex);
 
-        const directory = chunkDirectory(config.chunksDir, key);
-        await fsp.mkdir(directory, { recursive: true });
-        const partPath = path.join(directory, `${String(chunkIndex).padStart(8, '0')}.part`);
+        const telegramChunks = decodeTelegramChunks(file.storagePath);
+        const isTelegramUpload = telegramChunks !== null;
+        if (file.storagePath && !isTelegramUpload) return apiOk(res, chunkIndex);
+        if (isTelegramUpload && !telegramStorage) {
+          return apiFail(res, 'Telegram storage is not configured for this upload', 500);
+        }
+
+        const expectedSize = Math.min(
+          config.chunkSizeBytes,
+          metadata.fileSize - chunkIndex * config.chunkSizeBytes,
+        );
+        if (req.file.size !== expectedSize) {
+          return apiFail(res, 'Chunk size does not match the expected size');
+        }
+
+        const directory = isTelegramUpload ? null : chunkDirectory(config.chunksDir, key);
+        const partPath = isTelegramUpload
+          ? null
+          : path.join(directory, `${String(chunkIndex).padStart(8, '0')}.part`);
         let uploadedIndices = new Set(chunkInfo.uploadedIndices || []);
-        if (uploadedIndices.has(chunkIndex)) {
-          try {
-            await fsp.access(partPath);
-          } catch {
-            uploadedIndices.delete(chunkIndex);
+        if (isTelegramUpload) {
+          const savedChunk = telegramChunks.find((chunk) => chunk.idx === chunkIndex);
+          if (savedChunk) {
+            uploadedIndices.add(chunkIndex);
+            chunkInfo.uploadedIndices = [...uploadedIndices].sort((left, right) => left - right);
+            metadata.chunkInfo = chunkInfo;
+            store.updateFile(key, metadata, file.storagePath);
+            return apiOk(res, chunkIndex);
+          }
+          uploadedIndices.delete(chunkIndex);
+        } else {
+          await fsp.mkdir(directory, { recursive: true });
+          if (uploadedIndices.has(chunkIndex)) {
+            try {
+              await fsp.access(partPath);
+            } catch {
+              uploadedIndices.delete(chunkIndex);
+            }
           }
         }
 
         if (!uploadedIndices.has(chunkIndex)) {
-          const expectedSize = Math.min(
-            config.chunkSizeBytes,
-            metadata.fileSize - chunkIndex * config.chunkSizeBytes,
-          );
-          if (req.file.size !== expectedSize) {
-            return apiFail(res, 'Chunk size does not match the expected size');
+          if (isTelegramUpload) {
+            const buffer = await fsp.readFile(temporaryPath);
+            let uploaded;
+            try {
+              uploaded = await telegramStorage.uploadChunk(buffer, {
+                fileName: `part-${chunkIndex}`,
+              });
+            } catch (error) {
+              return apiFail(res, `Telegram chunk upload failed: ${error.message}`, 502);
+            }
+            telegramChunks.push({ idx: chunkIndex, fileId: uploaded.fileId, size: req.file.size });
+          } else {
+            await moveFile(temporaryPath, partPath);
           }
-          await moveFile(temporaryPath, partPath);
+
           uploadedIndices.add(chunkIndex);
           chunkInfo.uploadedIndices = [...uploadedIndices].sort((left, right) => left - right);
           metadata.chunkInfo = chunkInfo;
-          store.updateFile(key, metadata);
+          if (isTelegramUpload) {
+            store.updateFile(key, metadata, encodeTelegramChunks(telegramChunks));
+          } else {
+            store.updateFile(key, metadata);
+          }
         }
 
         if (uploadedIndices.size === chunkInfo.total) {
-          const finalPath = await assembleChunks(
-            config.chunksDir,
-            config.storageDir,
-            key,
-            chunkInfo.total,
-            metadata.fileSize,
-          );
-          try {
-            store.updateFile(key, metadata, finalPath);
-          } catch (error) {
-            await fsp.rm(finalPath, { force: true });
-            throw error;
+          if (isTelegramUpload) {
+            const sortedChunks = [...telegramChunks].sort((left, right) => left.idx - right.idx);
+            const totalSize = sortedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
+            if (sortedChunks.length !== chunkInfo.total || totalSize !== metadata.fileSize) {
+              return apiFail(res, 'Telegram chunks do not match the declared file size', 500);
+            }
+            store.updateFile(key, metadata, encodeTelegramChunks(sortedChunks));
+          } else {
+            const finalPath = await assembleChunks(
+              config.chunksDir,
+              config.storageDir,
+              key,
+              chunkInfo.total,
+              metadata.fileSize,
+            );
+            try {
+              store.updateFile(key, metadata, finalPath);
+            } catch (error) {
+              await fsp.rm(finalPath, { force: true });
+              throw error;
+            }
+            await fsp.rm(directory, { recursive: true, force: true });
           }
-          await fsp.rm(directory, { recursive: true, force: true });
         }
         return apiOk(res, chunkIndex);
       });
@@ -491,10 +568,15 @@ function createApp(config, options = {}) {
   app.post('/api/delete/:key', asyncRoute(async (req, res) => {
     const deleted = store.deleteFile(req.params.key);
     if (!deleted) return apiFail(res, 'Failed to delete file', 404);
-    const filePath = resolveFilePath(config.storageDir, req.params.key);
-    if (filePath) await fsp.rm(filePath, { force: true });
-    else if (deleted.storagePath) await fsp.rm(deleted.storagePath, { force: true });
-    await fsp.rm(chunkDirectory(config.chunksDir, req.params.key), { recursive: true, force: true });
+    const isTelegramStored = deleted.storagePath?.startsWith(TELEGRAM_FILE_PREFIX) ||
+      deleted.storagePath?.startsWith(TELEGRAM_CHUNKS_PREFIX);
+    // Match the original Worker behavior: remove the index entry, not Telegram messages.
+    if (!isTelegramStored) {
+      const filePath = resolveFilePath(config.storageDir, req.params.key);
+      if (filePath) await fsp.rm(filePath, { force: true });
+      else if (deleted.storagePath) await fsp.rm(deleted.storagePath, { force: true });
+      await fsp.rm(chunkDirectory(config.chunksDir, req.params.key), { recursive: true, force: true });
+    }
     const folderId = deleted.metadata.folderId;
     if (folderId) {
       const folder = store.getFolder(folderId);
@@ -503,11 +585,152 @@ function createApp(config, options = {}) {
     return apiOk(res, true, 'File deleted successfully');
   }));
 
+  function telegramResponseHeaders(metadata, fileSize, key, range) {
+    const headers = {
+      'Accept-Ranges': 'bytes',
+      'Content-Type': mime.lookup(metadata.fileName || '') || 'application/octet-stream',
+      'Content-Disposition': contentDisposition(metadata.fileName || key),
+      'Cache-Control': 'private, max-age=3600',
+      ETag: `"${crypto.createHash('sha256').update(key).digest('hex').slice(0, 16)}-${fileSize.toString(16)}"`,
+    };
+    if (range) {
+      headers['Content-Range'] = `bytes ${range.start}-${range.end}/${fileSize}`;
+      headers['Content-Length'] = String(range.end - range.start + 1);
+    } else {
+      headers['Content-Length'] = String(fileSize);
+    }
+    return headers;
+  }
+
+  async function serveTelegramSingleFile(req, res, key, record, fileId) {
+    if (!telegramStorage) return apiFail(res, 'Telegram storage is not configured', 502);
+    try {
+      if (req.method === 'HEAD') {
+        const info = await telegramStorage.getFileInfo(fileId);
+        const fileSize = info.fileSize || Number(record.metadata.fileSize || 0);
+        let range;
+        try {
+          range = parseRange(req.get('range'), fileSize);
+        } catch (error) {
+          return apiFail(res, error.message, error.status || 416, error.headers || {});
+        }
+        const status = range ? 206 : 200;
+        return res.set(telegramResponseHeaders(record.metadata, fileSize, key, range))
+          .status(status)
+          .end();
+      }
+
+      const remote = await telegramStorage.getFile(fileId);
+      const responseSize = Number(remote.response.headers.get('content-length') || 0);
+      const fileSize = remote.fileSize || responseSize || Number(record.metadata.fileSize || 0);
+      const rangeHeader = req.get('range');
+      if (rangeHeader) {
+        const bytes = Buffer.from(await remote.response.arrayBuffer());
+        const actualSize = bytes.length || fileSize;
+        let range;
+        try {
+          range = parseRange(rangeHeader, actualSize);
+        } catch (error) {
+          return apiFail(res, error.message, error.status || 416, error.headers || {});
+        }
+        return res.set(telegramResponseHeaders(record.metadata, actualSize, key, range))
+          .status(206)
+          .end(bytes.subarray(range.start, range.end + 1));
+      }
+
+      res.set(telegramResponseHeaders(record.metadata, fileSize, key, null)).status(200);
+      if (fileSize === 0) return res.end();
+      const stream = Readable.fromWeb(remote.response.body);
+      stream.on('error', (error) => {
+        if (res.headersSent) return res.destroy(error);
+        return apiFail(res, `Unable to read Telegram file: ${error.message}`, 502);
+      });
+      return stream.pipe(res);
+    } catch (error) {
+      if (res.headersSent) return res.destroy(error);
+      return apiFail(res, `Unable to fetch file from Telegram: ${error.message}`, 502);
+    }
+  }
+
+  async function* streamTelegramChunks(chunks, range) {
+    let offset = 0;
+    const rangeStart = range ? range.start : 0;
+    const rangeEndExclusive = range ? range.end + 1 : Number.POSITIVE_INFINITY;
+
+    for (const chunk of chunks) {
+      const chunkStart = offset;
+      const chunkEnd = chunkStart + chunk.size;
+      offset = chunkEnd;
+      if (chunkEnd <= rangeStart || chunkStart >= rangeEndExclusive) continue;
+
+      const remote = await telegramStorage.getFile(chunk.fileId);
+      if (range) {
+        const bytes = Buffer.from(await remote.response.arrayBuffer());
+        if (bytes.length !== chunk.size) {
+          throw new Error(`Telegram chunk ${chunk.idx} size does not match its metadata`);
+        }
+        const start = Math.max(0, rangeStart - chunkStart);
+        const end = Math.min(chunk.size, rangeEndExclusive - chunkStart);
+        yield bytes.subarray(start, end);
+      } else {
+        const stream = Readable.fromWeb(remote.response.body);
+        for await (const part of stream) yield part;
+      }
+    }
+  }
+
+  async function serveTelegramChunkedFile(req, res, key, record, chunks) {
+    if (!telegramStorage) return apiFail(res, 'Telegram storage is not configured', 502);
+    const totalChunks = Number(record.metadata.chunkInfo?.total || 0);
+    const sortedChunks = [...chunks].sort((left, right) => left.idx - right.idx);
+    const fileSize = sortedChunks.reduce((total, chunk) => total + chunk.size, 0);
+    if (
+      totalChunks <= 0 || sortedChunks.length !== totalChunks ||
+      sortedChunks.some((chunk, index) => chunk.idx !== index) ||
+      fileSize !== Number(record.metadata.fileSize)
+    ) {
+      return apiFail(res, 'File upload is incomplete', 425);
+    }
+
+    let range;
+    try {
+      range = parseRange(req.get('range'), fileSize);
+    } catch (error) {
+      return apiFail(res, error.message, error.status || 416, error.headers || {});
+    }
+    const status = range ? 206 : 200;
+    res.set(telegramResponseHeaders(record.metadata, fileSize, key, range)).status(status);
+    if (req.method === 'HEAD' || fileSize === 0) return res.end();
+
+    const stream = Readable.from(streamTelegramChunks(sortedChunks, range));
+    stream.on('error', (error) => {
+      if (res.headersSent) return res.destroy(error);
+      return apiFail(res, `Unable to read Telegram chunks: ${error.message}`, 502);
+    });
+    return stream.pipe(res);
+  }
+
   async function serveFile(req, res) {
     const key = req.params.key;
     const record = store.getFile(key);
     if (!record) return apiFail(res, `File not found for key: ${key}`, 404);
     if (!record.storagePath) return apiFail(res, 'File upload is incomplete', 425);
+
+    if (record.storagePath.startsWith(TELEGRAM_FILE_PREFIX)) {
+      return serveTelegramSingleFile(
+        req,
+        res,
+        key,
+        record,
+        record.storagePath.slice(TELEGRAM_FILE_PREFIX.length),
+      );
+    }
+    if (record.storagePath.startsWith(TELEGRAM_CHUNKS_PREFIX)) {
+      const chunks = decodeTelegramChunks(record.storagePath);
+      if (!chunks) return apiFail(res, 'Invalid Telegram chunk metadata', 500);
+      return serveTelegramChunkedFile(req, res, key, record, chunks);
+    }
+
     const filePath = resolveFilePath(config.storageDir, key);
     if (!filePath) return apiFail(res, `File not found for key: ${key}`, 404);
 
@@ -549,7 +772,7 @@ function createApp(config, options = {}) {
       if (res.headersSent) return res.destroy(error);
       return apiFail(res, 'Unable to read file', 500);
     });
-    stream.pipe(res);
+    return stream.pipe(res);
   }
 
   app.route('/file/:key').get(asyncRoute(serveFile)).head(asyncRoute(serveFile));

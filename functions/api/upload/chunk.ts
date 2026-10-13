@@ -1,64 +1,112 @@
 import { fail, ok } from "../../utils/common";
 import { DBAdapterFactory } from "../../utils/db-adapter";
 import { getUniqueFileId, buildKeyId, getFileExt } from "../../utils/file";
-import { CF, FileMetadata, FileType, MAX_CHUNK_NUM, MAX_FILE_SIZE, TEMP_CHUNK_TTL, chunkPrefix } from "../../utils/types";
+import {
+  FileMetadata,
+  FileTag,
+  FileType,
+  MAX_CHUNK_NUM,
+  MAX_CHUNK_SIZE,
+  MAX_FILE_SIZE,
+  chunkPrefix,
+} from "../../utils/types";
+import { getPhotoFolder } from "../../utils/photo-folders";
+import { getKVBinding } from "../../utils/cloudflare-bindings";
 
-// 分片上传流程：
-// 1. 前端发起分片上传初始化请求，获取chunks对应的唯一key，然后前端自行分片上传
-// 2. 后端接收分片后，逐个上传，并维护chunkInfo.uploadedIndices数组，当数组长度等于chunkInfo.total时即上传完成
+const FILE_TYPES = new Set(Object.values(FileType));
 
-// 初始化分片上传, 返回唯一文件key
-export async function onRequestGet(context: any): Promise<Response> {
-  // TODO: Demo演示站不得初始化分片上传
-  return fail(`Forbidden: not allowed to init chunk upload in demo`, 403);
+// Initialize a chunked upload and persist its album assignment before chunks arrive.
+export async function onRequestGet({ request, env }: any): Promise<Response> {
+  try {
+    const params = new URL(request.url).searchParams;
+    const fileType = params.get("fileType") as FileType | null;
+    const fileName = (params.get("fileName") || "upload").trim().slice(0, 100);
+    const fileSize = Number(params.get("fileSize"));
+    const totalChunks = Number(params.get("totalChunks"));
 
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const params = url.searchParams;
-  const fileType = params.get("fileType") as FileType;
-  const fileName = params.get("fileName").substring(0, 100);  //  不超过100个字符 
-  const fileSize = parseInt(params.get("fileSize"), 10);
-  const totalChunks = parseInt(params.get("totalChunks"), 10);
+    if (
+      !fileType || !FILE_TYPES.has(fileType) || !fileName ||
+      !Number.isSafeInteger(fileSize) || fileSize <= MAX_CHUNK_SIZE ||
+      !Number.isInteger(totalChunks) || totalChunks < 2
+    ) {
+      return fail("Invalid chunk upload parameters", 400);
+    }
+    if (fileSize > MAX_FILE_SIZE || totalChunks > MAX_CHUNK_NUM) {
+      return fail("File size exceeds the 1,000 MiB upload limit", 413);
+    }
+    if (totalChunks !== Math.ceil(fileSize / MAX_CHUNK_SIZE)) {
+      return fail("Chunk count does not match the declared file size", 400);
+    }
 
-  if (fileSize >= MAX_FILE_SIZE || totalChunks >= MAX_CHUNK_NUM) {
-    return fail("File size exceeds the limit", 400);
+    const folderId = params.get("folderId") || "";
+    if (folderId) {
+      if (fileType !== FileType.Image && fileType !== FileType.Video) {
+        return fail("Only photo and video files can be uploaded to an album", 400);
+      }
+      const folder = await getPhotoFolder(getKVBinding(env), folderId);
+      if (!folder) return fail("Album not found", 404);
+    }
+
+    const metadata: FileMetadata = {
+      fileName,
+      fileSize,
+      uploadedAt: Date.now(),
+      liked: false,
+      tags: params.get("nsfw") === "true" ? [FileTag.NSFW] : [],
+      chunkInfo: {
+        total: totalChunks,
+        uploadedIndices: [],
+      },
+    };
+    if (folderId) metadata.folderId = folderId;
+
+    const key = buildKeyId(fileType, `${chunkPrefix}${getUniqueFileId()}`, getFileExt(fileName));
+    await getKVBinding(env).put(key, "", { metadata });
+    return ok(key);
+  } catch (error: any) {
+    console.error("Chunk upload initialization error:", error);
+    return fail(`Failed to initialize upload: ${error?.message || "unknown error"}`, 500);
   }
-
-  const fileId = getUniqueFileId();
-  const key = buildKeyId(fileType, `${chunkPrefix}${fileId}`, getFileExt(fileName));
-
-  const metadata: FileMetadata = {
-    fileName,
-    fileSize,
-    uploadedAt: Date.now(), // 第一次 put 时设置
-    liked: false,
-    chunkInfo: {
-      total: totalChunks,
-      uploadedIndices: [],
-    },
-  };
-
-  await env[CF.KV_NAME].put(key, "", { metadata, expirationTtl: TEMP_CHUNK_TTL });
-
-  return ok(key);
 }
 
-// 上传分片
-export async function onRequestPost(context: any): Promise<Response> {
-  // TODO: Demo演示站不得上传分片
-  return fail(`Forbidden: not allowed to upload chunk in demo`, 403);
+// Upload one chunk to Telegram/R2 and await its persisted progress before responding.
+export async function onRequestPost({ request, env }: any): Promise<Response> {
+  try {
+    const formData = await request.formData();
+    const key = formData.get("key");
+    const rawIndex = formData.get("chunkIndex");
+    const chunk = formData.get("chunkFile");
 
-  const { request, env, waitUntil } = context;
+    if (typeof key !== "string" || typeof rawIndex !== "string" || !chunk || typeof chunk === "string") {
+      return fail("Missing chunk upload fields", 400);
+    }
+    if (!/^(img|audio|video|doc):chunk_[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,10}$/i.test(key)) {
+      return fail("Invalid chunk upload key", 400);
+    }
 
-  const clonedRequest = request.clone();
-  const formData = await clonedRequest.formData();
+    const chunkIndex = Number(rawIndex);
+    if (!Number.isInteger(chunkIndex)) return fail("Invalid chunk index", 400);
 
-  const key = formData.get("key");
-  const chunkIndex = parseInt(formData.get("chunkIndex") as string, 10);
-  const chunk = formData.get("chunkFile") as File;
+    const kv = getKVBinding(env);
+    const stored = await kv.getWithMetadata(key);
+    const metadata = stored?.metadata as FileMetadata | undefined;
+    if (!metadata?.chunkInfo) return fail("Chunk upload was not initialized", 404);
+    if (chunkIndex < 0 || chunkIndex >= metadata.chunkInfo.total) {
+      return fail("Chunk index is out of range", 400);
+    }
 
-  console.log(`Upload chunk ${chunkIndex} for key ${key}`);
+    const expectedSize = Math.min(
+      MAX_CHUNK_SIZE,
+      metadata.fileSize - chunkIndex * MAX_CHUNK_SIZE,
+    );
+    if (chunk.size !== expectedSize) {
+      return fail("Chunk size does not match the expected size", 400);
+    }
 
-  const db = DBAdapterFactory.getAdapter(env);
-  return await db.uploadChunk(key, chunkIndex, chunk, waitUntil);
+    const dbAdapter = DBAdapterFactory.getAdapter(env);
+    return await dbAdapter.uploadChunk(key, chunkIndex, chunk);
+  } catch (error: any) {
+    console.error("Chunk upload error:", error);
+    return fail(`Failed to upload chunk: ${error?.message || "unknown error"}`, 500);
+  }
 }

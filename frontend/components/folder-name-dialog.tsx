@@ -64,7 +64,7 @@ export function FolderNameDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="border-white/10 bg-[#0d2137] text-white sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{folder ? "Rename album" : "Create photo album"}</DialogTitle>
+          <DialogTitle>{folder ? "Rename album" : "Create album"}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="space-y-2">
@@ -79,7 +79,7 @@ export function FolderNameDialog({
               disabled={isSubmitting}
               className="border-white/20 bg-white/10 text-white placeholder:text-white/40"
             />
-            <p className="text-xs text-white/45">Up to 80 characters. Albums only contain photos.</p>
+            <p className="text-xs text-white/45">Up to 80 characters. Albums can contain photos and videos.</p>
           </div>
           <DialogFooter>
             <Button

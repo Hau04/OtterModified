@@ -38,7 +38,7 @@ import { useToast } from "@/hooks/use-toast";
 import { FileDetailDialog } from "@/components/file-detail-dialog";
 import { EditMetadataDialog } from "@/components/edit-metadata-dialog";
 import { getFileUrl, deleteFile, toggleLike, uploadChunk } from "@/lib/api";
-import { FileItem, FileTag, ImageLoadMode, MAX_CONCURRENTS, MAX_CHUNK_SIZE, FileType } from "@/lib/types";
+import { FileItem, FileTag, ImageLoadMode, MAX_CHUNK_SIZE, FileType } from "@/lib/types";
 import { getFileTypeFromKey, downloadFile, cn, formatFileSize, formatTime } from "@/lib/utils";
 
 interface FileCardProps {
@@ -245,7 +245,7 @@ export function FileCard({
   onSetFolderPoster,
   folderPosterUpdating = false,
 }: FileCardProps) {
-  const {selectedKeys, toggleSelection, deleteFilesLocal, updateFileMetadata, fetchFolders, safeMode, imageLoadMode} = useFileStore();
+  const {selectedKeys, toggleSelection, deleteFilesLocal, updateFileMetadata, fetchFolders, refreshAlbumFiles, safeMode, imageLoadMode} = useFileStore();
   const [showDetail, setShowDetail] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
@@ -284,6 +284,7 @@ export function FileCard({
     }
 
     deleteFilesLocal([file.name]);
+    if (file.metadata.folderId) refreshAlbumFiles();
     if (fileType === FileType.Image) {
       fetchFolders(true).catch((error) => console.error("Unable to refresh albums:", error));
     }
@@ -368,19 +369,12 @@ export function FileCard({
         }
       }
 
-      // 分批并发上传缺失分片
-      for (let i = 0; i < chunkIndicesToUpload.length; i += MAX_CONCURRENTS) {
-        const batch: Promise<void>[] = [];
-        const end = Math.min(i + MAX_CONCURRENTS, chunkIndicesToUpload.length);
-        for (let j = i; j < end; j++) {
-          const chunkIndex = chunkIndicesToUpload[j];
-          const start = chunkIndex * MAX_CHUNK_SIZE;
-          const endPos = Math.min(start + MAX_CHUNK_SIZE, selectedFile.size);
-          const chunkFile = selectedFile.slice(start, endPos);
-
-          batch.push(uploadChunk(file.name, chunkIndex, chunkFile).then(() => {}));
-        }
-        await Promise.all(batch);
+      // Send each chunk sequentially so KV progress updates cannot race.
+      for (const chunkIndex of chunkIndicesToUpload) {
+        const start = chunkIndex * MAX_CHUNK_SIZE;
+        const endPos = Math.min(start + MAX_CHUNK_SIZE, selectedFile.size);
+        const chunkFile = selectedFile.slice(start, endPos);
+        await uploadChunk(file.name, chunkIndex, chunkFile);
       }
 
       // 更新 metadata

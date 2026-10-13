@@ -83,6 +83,17 @@ export function getPhotoFolders(): Promise<{ folders: PhotoFolder[] }> {
   return request<{ folders: PhotoFolder[] }>(`${API_URL}/api/folders`);
 }
 
+export function getAlbumFiles(
+  albumId: string,
+  cursor?: string,
+): Promise<ListFilesResponse> {
+  const params = new URLSearchParams({ limit: "100" });
+  if (cursor) params.set("cursor", cursor);
+  return request<ListFilesResponse>(
+    `${API_URL}/api/folders/${encodeURIComponent(albumId)}/files?${params}`,
+  );
+}
+
 export function createPhotoFolder(name: string): Promise<PhotoFolder> {
   return request<PhotoFolder>(`${API_URL}/api/folders`, {
     method: "POST",

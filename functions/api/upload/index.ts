@@ -1,87 +1,47 @@
 import { fail } from "../../utils/common";
 import { DBAdapterFactory } from "../../utils/db-adapter";
-import { CF, FileMetadata, FileTag, MAX_CHUNK_SIZE } from "../../utils/types";
+import { FileMetadata, FileTag, MAX_CHUNK_SIZE } from "../../utils/types";
 import { getPhotoFolder } from "../../utils/photo-folders";
+import { getKVBinding } from "../../utils/cloudflare-bindings";
 
-// 单个文件上传
-export async function onRequestPost(context: any) {
-    const { request, env } = context;
-    const isOverLimit = await checkFileCountLimit(env);
-    if (isOverLimit) {
-        return fail('File count exceeds limit, please try again later', 400);
-    }
-
-    try {
-        const clonedRequest = request.clone();
-        const formData = await clonedRequest.formData();
-
-        const uploadFile = formData.get('file');
-        if (!uploadFile) {
-            return fail('No file uploaded', 400);
-        }
-
-        if (uploadFile.size > MAX_CHUNK_SIZE) {
-            return fail(`File size exceeds ${MAX_CHUNK_SIZE / (1024 * 1024)}MB limit`, 400);
-        }
-
-        const fileName = uploadFile.name.substring(0, 100);  //  不超过100个字符 
-        const fileSize = uploadFile.size;
-
-        // 创建存储适配器实例
-        const dbAdapter = DBAdapterFactory.getAdapter(env);
-
-        const isNsfw = formData.get('nsfw') === 'true';
-        console.log(formData);
-
-        const metadata: FileMetadata = {
-            fileName,
-            fileSize,
-            uploadedAt: Date.now(),
-            liked: false,
-            tags: isNsfw ? [FileTag.NSFW] : [],
-        };
-
-        const requestedFolderId = formData.get("folderId");
-        if (typeof requestedFolderId === "string" && requestedFolderId) {
-            if (!uploadFile.type?.startsWith("image/")) {
-                return fail("Only image files can be uploaded to photo folders", 400);
-            }
-
-            const folder = await getPhotoFolder(env[CF.KV_NAME], requestedFolderId);
-            if (!folder) {
-                return fail("Photo folder not found", 404);
-            }
-            metadata.folderId = requestedFolderId;
-        }
-
-        // console.log('Uploading file:', fileName, fileSize);
-        return await dbAdapter.uploadFile(uploadFile, metadata);
-    } catch (error: any) {
-        console.error('Upload error:', error);
-        return fail(`Failed to upload file: ${error.message}`, 500);
-    }
-}
-
-/**
- * 检查文件数量是否超过限制
- * @param env Cloudflare环境变量
- * @param maxFiles 最大文件数量
- * @returns 是否超过限制
- */
-async function checkFileCountLimit(
-  env: any,
-  maxFiles: number = 100,
-): Promise<boolean> {
+// Upload one file directly. Larger media is sent through the chunk endpoint.
+export async function onRequestPost({ request, env }: any) {
   try {
-    const kv = env[CF.KV_NAME];
-    const filePrefixes = ["img:", "audio:", "video:", "doc:"];
-    const lists = await Promise.all(
-      filePrefixes.map((prefix) => kv.list({ prefix, limit: maxFiles })),
-    );
-    const fileCount = lists.reduce((count, list) => count + list.keys.length, 0);
-    return fileCount >= maxFiles;
-  } catch (error) {
-    console.error("检查文件数量失败:", error);
-    return false;
+    const formData = await request.formData();
+    const uploaded = formData.get("file");
+    if (!uploaded || typeof uploaded === "string") {
+      return fail("No file uploaded", 400);
+    }
+
+    if (uploaded.size > MAX_CHUNK_SIZE) {
+      return fail(`File size exceeds ${MAX_CHUNK_SIZE / (1024 * 1024)} MiB limit`, 413);
+    }
+
+    const fileName = uploaded.name.substring(0, 100);
+    const metadata: FileMetadata = {
+      fileName,
+      fileSize: uploaded.size,
+      uploadedAt: Date.now(),
+      liked: false,
+      tags: formData.get("nsfw") === "true" ? [FileTag.NSFW] : [],
+    };
+
+    const requestedFolderId = formData.get("folderId");
+    if (typeof requestedFolderId === "string" && requestedFolderId) {
+      const isAlbumMedia = uploaded.type.startsWith("image/") || uploaded.type.startsWith("video/");
+      if (!isAlbumMedia) {
+        return fail("Only photo and video files can be uploaded to an album", 400);
+      }
+
+      const folder = await getPhotoFolder(getKVBinding(env), requestedFolderId);
+      if (!folder) return fail("Album not found", 404);
+      metadata.folderId = requestedFolderId;
+    }
+
+    const dbAdapter = DBAdapterFactory.getAdapter(env);
+    return await dbAdapter.uploadFile(uploaded, metadata);
+  } catch (error: any) {
+    console.error("Upload error:", error);
+    return fail(`Failed to upload file: ${error?.message || "unknown error"}`, 500);
   }
 }
