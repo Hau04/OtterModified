@@ -1,5 +1,5 @@
 [Unit]
-Description=OtterHub Python API and static frontend
+Description=OtterHub Node.js API and static frontend
 After=network-online.target
 Wants=network-online.target
 
@@ -7,9 +7,10 @@ Wants=network-online.target
 Type=simple
 User=otterhub
 Group=otterhub
-WorkingDirectory=/opt/otterhub/current/backend
+WorkingDirectory=/opt/otterhub/current/node-vps
 EnvironmentFile=/opt/otterhub/shared/otterhub.env
-ExecStart=/opt/otterhub/current/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/otterhub/current/node-vps/src/server.js
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30
@@ -19,7 +20,6 @@ PrivateDevices=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-Environment=PYTHONDONTWRITEBYTECODE=1
 ReadWritePaths=/var/lib/otterhub
 
 [Install]

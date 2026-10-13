@@ -154,7 +154,7 @@ export function FileUploadZone() {
         if (file.size > MAX_FILE_SIZE) {
           toast({
             title: `File is larger than ${formatFileSize(MAX_FILE_SIZE)}`,
-            description: "Increase the Python server upload limit to accept larger files.",
+            description: "Increase the server upload limit to accept larger files.",
             variant: "destructive",
           })
           return null

@@ -3,12 +3,7 @@ data
 .wrangler
 .claude
 
-# Python VPS backend
-.venv/
-backend/.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
+# Node.js VPS environment and local runtime data
 .env
-backend/.env
-backend/data/
+node-vps/.env
+node-vps/data/
