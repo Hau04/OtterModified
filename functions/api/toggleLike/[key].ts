@@ -1,13 +1,15 @@
 import { fail, ok } from "../../utils/common";
-import { CF, FileMetadata } from "../../utils/types";
+import { FileMetadata } from "../../utils/types";
+import { getKVBinding } from "../../utils/cloudflare-bindings";
 
 // 修改文件名
 export async function onRequestPost(context: any) {
   const { params, env } = context;
 
   // 获取元数据
-  const value = await env[CF.KV_NAME].getWithMetadata(params.key);
-  const metadata: FileMetadata = value.metadata;
+  const kv = getKVBinding(env);
+  const stored = await kv.getWithMetadata(params.key);
+  const metadata: FileMetadata = stored.metadata;
 
   // 如果记录不存在
   if (!metadata)
@@ -15,7 +17,7 @@ export async function onRequestPost(context: any) {
 
   // 切换 liked 状态
   metadata.liked = !metadata.liked;
-  await env[CF.KV_NAME].put(params.key, "", { metadata });
+  await kv.put(params.key, stored.value ?? "", { metadata });
 
   console.log("Updated metadata:", metadata);
 

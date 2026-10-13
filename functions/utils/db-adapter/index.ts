@@ -2,6 +2,7 @@ import { isDev } from "../common";
 import { FileMetadata, CF } from "../types";
 import { R2AdapterV2 } from "./r2-adapter-v2";
 import { TGAdapterV2 } from "./tg-adapter-v2";
+import { getKVBindingName } from "../cloudflare-bindings";
 
 // 存储适配器接口定义
 export interface DBAdapter {
@@ -43,14 +44,16 @@ export class DBAdapterFactory {
       return this.adapterInstances.get(type)!;
     }
 
-    // 创建新实例
+    // Create adapters against the bound namespace, preferring the existing
+    // deployment name and allowing an explicit OTTERHUB_KV_BINDING override.
+    const kvName = getKVBindingName(env);
     let adapter: DBAdapter;
     switch (type.toLowerCase()) {
       case DBAdapterType.R2:
-        adapter = new R2AdapterV2(env, CF.R2_BUCKET, CF.KV_NAME);
+        adapter = new R2AdapterV2(env, CF.R2_BUCKET, kvName);
         break;
       case DBAdapterType.TG:
-        adapter = new TGAdapterV2(env, CF.KV_NAME);
+        adapter = new TGAdapterV2(env, kvName);
         break;
       default:
         throw new Error(`Unsupported storage adapter type: ${type}`);

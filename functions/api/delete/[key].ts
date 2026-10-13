@@ -1,7 +1,8 @@
 import { fail, ok } from "../../utils/common";
 import { DBAdapterFactory } from "../../utils/db-adapter";
-import { CF, FileMetadata } from "../../utils/types";
-import { getPhotoFolder, photoFolderKey } from "../../utils/photo-folders";
+import { FileMetadata } from "../../utils/types";
+import { getKVBinding } from "../../utils/cloudflare-bindings";
+import { getPhotoFolder, photoFolderKey, removeFileFromAlbum } from "../../utils/photo-folders";
 
 const NOT_ALLOWED_DELETE = [
     'img:AgACAgUAAyEGAASJIjr1AAIDbmljUd7-V2sXHaws4e5zy5BvfIfkAAKmDmsbsDcYV1OLkqQ2W1brAQADAgADdwADOAQ.jpg',
@@ -22,7 +23,7 @@ export async function onRequestPost({ env, params, request }: any) {
       return fail('You can not delete default file', 403);
     }
 
-    const kv = env[CF.KV_NAME];
+    const kv = getKVBinding(env);
     const file = await kv.getWithMetadata(params.key);
     const metadata = file?.metadata as FileMetadata | undefined;
 
@@ -30,6 +31,10 @@ export async function onRequestPost({ env, params, request }: any) {
     const isDeleted = await db.delete(params.key);
     if (!isDeleted) {
       return fail('Failed to delete file', 404);
+    }
+
+    if (metadata?.folderId) {
+      await removeFileFromAlbum(kv, metadata.folderId, params.key);
     }
 
     if (metadata?.folderId) {

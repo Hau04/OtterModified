@@ -7,6 +7,7 @@ const BASIC_AUTH = "Basic YWRtaW46MTIzNDU2";  // BASIC_USER=admin && BASIC_PASS=
 describe("File API Endpoints", function () {
   // Shared state across tests
   let uploadedFileKey;
+  let uploadedVideoKey;
   let uploadedFileUrl;
 
   // 上传
@@ -48,7 +49,7 @@ describe("File API Endpoints", function () {
   });
 
   describe("Photo folder endpoints", function () {
-    it("should assign photos, set a poster, and preserve photos when deleting an album", async function () {
+    it("should create a named album first and store photos and videos inside it", async function () {
       if (!uploadedFileKey) {
         this.skip();
       }
@@ -82,6 +83,33 @@ describe("File API Endpoints", function () {
         assert.equal(assignResponse.status, 200);
         assert.ok((await assignResponse.json()).success);
 
+        const videoForm = new FormData();
+        videoForm.append("file", Buffer.from("video-bytes"), {
+          filename: "album-video.mp4",
+          contentType: "video/mp4",
+        });
+        videoForm.append("folderId", folderId);
+        const videoResponse = await fetch("http://localhost:8080/api/upload", {
+          method: "POST",
+          body: videoForm.getBuffer(),
+          headers: { ...videoForm.getHeaders(), Authorization: BASIC_AUTH },
+        });
+        assert.equal(videoResponse.status, 200);
+        const uploadedVideo = await videoResponse.json();
+        assert.ok(uploadedVideo.success);
+        uploadedVideoKey = uploadedVideo.data;
+
+        const albumMediaResponse = await fetch(
+          `http://localhost:8080/api/folders/${folderId}/files`,
+          { headers: { Authorization: BASIC_AUTH } },
+        );
+        assert.equal(albumMediaResponse.status, 200);
+        const albumMedia = await albumMediaResponse.json();
+        assert.deepEqual(
+          new Set(albumMedia.data.keys.map((item) => item.name)),
+          new Set([uploadedFileKey, uploadedVideoKey]),
+        );
+
         const posterResponse = await fetch(
           `http://localhost:8080/api/folders/${folderId}`,
           {
@@ -107,6 +135,7 @@ describe("File API Endpoints", function () {
         assert.equal(deleteFolderResponse.status, 200);
         const deletedFolder = await deleteFolderResponse.json();
         assert.ok(deletedFolder.data.detachedKeys.includes(uploadedFileKey));
+        assert.ok(deletedFolder.data.detachedKeys.includes(uploadedVideoKey));
         folderId = undefined;
 
         const listResponse = await fetch("http://localhost:8080/api/list?fileType=img", {
@@ -116,6 +145,14 @@ describe("File API Endpoints", function () {
         const photo = fileList.data.keys.find((item) => item.name === uploadedFileKey);
         assert.ok(photo);
         assert.equal(photo.metadata.folderId, undefined);
+
+        const videoListResponse = await fetch("http://localhost:8080/api/list?fileType=video", {
+          headers: { Authorization: BASIC_AUTH },
+        });
+        const videoList = await videoListResponse.json();
+        const video = videoList.data.keys.find((item) => item.name === uploadedVideoKey);
+        assert.ok(video);
+        assert.equal(video.metadata.folderId, undefined);
       } finally {
         if (folderId) {
           await fetch(`http://localhost:8080/api/folders/${folderId}`, {
@@ -175,6 +212,18 @@ describe("File API Endpoints", function () {
 
       const result = await response.json();
       assert.ok(result.success);
+
+      if (uploadedVideoKey) {
+        const videoDelete = await fetch(
+          `http://localhost:8080/api/delete/${uploadedVideoKey}`,
+          {
+            method: "POST",
+            headers: { Authorization: BASIC_AUTH },
+          },
+        );
+        assert.equal(videoDelete.status, 200);
+        uploadedVideoKey = undefined;
+      }
     });
   });
 });

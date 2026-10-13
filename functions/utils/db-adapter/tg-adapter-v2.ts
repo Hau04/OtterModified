@@ -7,7 +7,6 @@ import {
   ApiResponse,
   MAX_CHUNK_SIZE,
   Chunk,
-  TEMP_CHUNK_TTL,
 } from "../types";
 import {
   parseRangeHeader,
@@ -23,6 +22,7 @@ import {
   getTgFile,
   processGifFile,
 } from "./tg-tools";
+import { addFileToAlbum } from "../photo-folders";
 
 // Telegram存储适配器实现（新版本：优化分片上传）
 export class TGAdapterV2 extends BaseAdapter {
@@ -35,7 +35,7 @@ export class TGAdapterV2 extends BaseAdapter {
     metadata: FileMetadata,
   ): Promise<Response> {
     if (metadata.fileSize > MAX_CHUNK_SIZE) {
-      throw new Error(`File size exceeds ${MAX_CHUNK_SIZE}MB`);
+      throw new Error(`File size exceeds ${MAX_CHUNK_SIZE / (1024 * 1024)} MiB`);
     }
 
     const { fileName } = metadata;
@@ -69,11 +69,10 @@ export class TGAdapterV2 extends BaseAdapter {
     const key = buildKeyId(fileType, tgFileId, ext);
 
     const kv = this.env[this.kvName];
-    if (kv) {
-      // await kv.put(key, "", { metadata });
-      // TODO: 演示站必须设置过期时间
-      await kv.put(key, "", { metadata, expirationTtl: TEMP_CHUNK_TTL });
-    }
+    if (!kv) throw new Error(`Missing KV binding: ${this.kvName}`);
+    // Telegram holds the binary; keep the file index permanently in KV.
+    await kv.put(key, "", { metadata });
+    if (metadata.folderId) await addFileToAlbum(kv, metadata.folderId, key);
 
     return ok(key, JSON.stringify(result));
   }

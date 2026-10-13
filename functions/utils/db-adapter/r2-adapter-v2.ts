@@ -16,6 +16,7 @@ import {
   sortChunksAndCalculateSize,
   validateChunksForMerge,
 } from "./shared-utils";
+import { addFileToAlbum } from "../photo-folders";
 
 // R2存储适配器实现（新版本：优化分片上传）
 export class R2AdapterV2 extends BaseAdapter {
@@ -56,9 +57,11 @@ export class R2AdapterV2 extends BaseAdapter {
       },
     });
 
-    // 将文件信息保存到KV存储（value 为空字符串，chunks 在 metadata）
-    if (this.env[this.kvName]) {
-      await this.env[this.kvName].put(key, "", { metadata });
+    // 将文件信息保存到 KV；二进制文件仍保存在 R2。
+    const kv = this.env[this.kvName];
+    if (kv) {
+      await kv.put(key, "", { metadata });
+      if (metadata.folderId) await addFileToAlbum(kv, metadata.folderId, key);
     }
 
     return ok(key);

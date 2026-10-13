@@ -35,7 +35,7 @@ export type FileMetadata = {
   uploadedAt: number;   // 时间戳
   liked: boolean;      // 是否被收藏
   tags?: FileTag[] | string[];
-  folderId?: string;   // 图片所属的相册（虚拟文件夹）
+  folderId?: string;   // 图片或视频所属的相册
   chunkInfo?: ChunkInfo; // 分片信息（大文件分片上传时使用）
 };
 
@@ -43,6 +43,7 @@ export type PhotoFolder = {
   id: string;
   name: string;
   coverKey: string | null;
+  coverTags?: string[];
   createdAt: number;
   updatedAt: number;
 };
@@ -87,8 +88,8 @@ export type ListFilesResponse = {
 
 // == 常量
 // 临时分片超时时间（秒）
-export const TEMP_CHUNK_TTL = 3600; // 1小时， 在Demo演示站可以用于所有文件KV的TTL
+export const TEMP_CHUNK_TTL = 3600; // Temporary upload chunks expire after one hour.
 export const MAX_CHUNK_SIZE = 20 * 1024 * 1024; // 20MB
 
-export const MAX_CHUNK_NUM = 1 // TODO: Demo演示站不得上传大文件
+export const MAX_CHUNK_NUM = 50 // 50 x 20 MiB chunks = 1,000 MiB max
 export const MAX_FILE_SIZE = MAX_CHUNK_SIZE * MAX_CHUNK_NUM

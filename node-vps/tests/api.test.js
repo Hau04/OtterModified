@@ -187,3 +187,142 @@ test('rejects placeholder production credentials and foldered non-image uploads'
     });
   assert.equal(rejected.status, 400);
 });
+
+test('selects Telegram storage when bot settings are supplied and validates its credentials', () => {
+  const telegramConfig = loadConfig({
+    APP_ENV: 'test',
+    TG_BOT_TOKEN: 'test-token',
+    TG_CHAT_ID: '-1001234567890',
+  });
+  assert.equal(telegramConfig.storageBackend, 'telegram');
+  assert.equal(telegramConfig.telegramChatId, '-1001234567890');
+  assert.throws(() => loadConfig({
+    APP_ENV: 'test',
+    STORAGE_BACKEND: 'telegram',
+    TG_BOT_TOKEN: 'test-token',
+  }), /both TG_BOT_TOKEN and TG_CHAT_ID/);
+});
+
+test('stores direct Telegram uploads remotely and serves byte ranges', async () => {
+  const telegramRoot = path.join(root, 'telegram-direct');
+  const staticDir = path.join(telegramRoot, 'static');
+  await fs.mkdir(staticDir, { recursive: true });
+  await fs.writeFile(path.join(staticDir, 'index.html'), '<main>Telegram test frontend</main>');
+  const telegramConfig = loadConfig({
+    APP_ENV: 'test',
+    STORAGE_BACKEND: 'telegram',
+    TG_BOT_TOKEN: 'test-token',
+    TG_CHAT_ID: '-1001234567890',
+    DATA_DIR: path.join(telegramRoot, 'data'),
+    DATABASE_PATH: path.join(telegramRoot, 'data', 'db.sqlite3'),
+    STORAGE_DIR: path.join(telegramRoot, 'data', 'files'),
+    CHUNKS_DIR: path.join(telegramRoot, 'data', 'chunks'),
+    TEMP_UPLOAD_DIR: path.join(telegramRoot, 'data', 'uploads'),
+    FRONTEND_DIR: staticDir,
+    CHUNK_SIZE_BYTES: '10',
+  });
+  const telegramStore = await DatabaseStore.open(telegramConfig.databasePath);
+  const remoteFiles = new Map();
+  let nextId = 0;
+  const telegramStorage = {
+    async uploadFile(buffer) {
+      const fileId = `direct-${++nextId}`;
+      remoteFiles.set(fileId, Buffer.from(buffer));
+      return { fileId, fileSize: buffer.length };
+    },
+    async getFileInfo(fileId) {
+      const file = remoteFiles.get(fileId);
+      if (!file) throw new Error('missing mock Telegram file');
+      return { filePath: fileId, fileSize: file.length };
+    },
+    async getFile(fileId) {
+      const file = remoteFiles.get(fileId);
+      if (!file) throw new Error('missing mock Telegram file');
+      return { filePath: fileId, fileSize: file.length, response: new Response(file) };
+    },
+  };
+  const telegramApp = createApp(telegramConfig, { store: telegramStore, telegramStorage });
+
+  const uploaded = await request(telegramApp)
+    .post('/api/upload')
+    .attach('file', Buffer.from('photo'), { filename: 'photo.png', contentType: 'image/png' });
+  assert.equal(uploaded.status, 200);
+  const key = uploaded.body.data;
+  assert.equal(telegramStore.getFile(key).storagePath, 'telegram-file:direct-1');
+  assert.deepEqual((await request(telegramApp).get(`/file/${key}`)).body, Buffer.from('photo'));
+  const ranged = await request(telegramApp).get(`/file/${key}`).set('Range', 'bytes=1-3');
+  assert.equal(ranged.status, 206);
+  assert.deepEqual(ranged.body, Buffer.from('hot'));
+  assert.equal(ranged.headers['content-range'], 'bytes 1-3/5');
+  await assert.rejects(fs.stat(telegramConfig.storageDir), { code: 'ENOENT' });
+  telegramStore.close();
+});
+
+test('uploads Telegram chunks without assembling a local media file', async () => {
+  const telegramRoot = path.join(root, 'telegram-chunks');
+  const staticDir = path.join(telegramRoot, 'static');
+  await fs.mkdir(staticDir, { recursive: true });
+  await fs.writeFile(path.join(staticDir, 'index.html'), '<main>Telegram chunk test</main>');
+  const telegramConfig = loadConfig({
+    APP_ENV: 'test',
+    STORAGE_BACKEND: 'telegram',
+    TG_BOT_TOKEN: 'test-token',
+    TG_CHAT_ID: '-1001234567890',
+    DATA_DIR: path.join(telegramRoot, 'data'),
+    DATABASE_PATH: path.join(telegramRoot, 'data', 'db.sqlite3'),
+    STORAGE_DIR: path.join(telegramRoot, 'data', 'files'),
+    CHUNKS_DIR: path.join(telegramRoot, 'data', 'chunks'),
+    TEMP_UPLOAD_DIR: path.join(telegramRoot, 'data', 'uploads'),
+    FRONTEND_DIR: staticDir,
+    MAX_UPLOAD_SIZE_BYTES: '100',
+    CHUNK_SIZE_BYTES: '4',
+  });
+  const telegramStore = await DatabaseStore.open(telegramConfig.databasePath);
+  const remoteFiles = new Map();
+  let nextId = 0;
+  const telegramStorage = {
+    async uploadChunk(buffer) {
+      const fileId = `chunk-${++nextId}`;
+      remoteFiles.set(fileId, Buffer.from(buffer));
+      return { fileId, fileSize: buffer.length };
+    },
+    async getFileInfo(fileId) {
+      const file = remoteFiles.get(fileId);
+      if (!file) throw new Error('missing mock Telegram chunk');
+      return { filePath: fileId, fileSize: file.length };
+    },
+    async getFile(fileId) {
+      const file = remoteFiles.get(fileId);
+      if (!file) throw new Error('missing mock Telegram chunk');
+      return { filePath: fileId, fileSize: file.length, response: new Response(file) };
+    },
+  };
+  const telegramApp = createApp(telegramConfig, { store: telegramStore, telegramStorage });
+
+  const initialized = await request(telegramApp).get('/api/upload/chunk').query({
+    fileType: 'video',
+    fileName: 'clip.mp4',
+    fileSize: '6',
+    totalChunks: '2',
+  });
+  assert.equal(initialized.status, 200);
+  const key = initialized.body.data;
+  for (const [index, chunk] of [[0, 'abcd'], [1, 'ef']]) {
+    const uploaded = await request(telegramApp)
+      .post('/api/upload/chunk')
+      .field('key', key)
+      .field('chunkIndex', String(index))
+      .attach('chunkFile', Buffer.from(chunk), `part-${index}`);
+    assert.equal(uploaded.status, 200);
+  }
+
+  const stored = telegramStore.getFile(key);
+  assert.match(stored.storagePath, /^telegram-chunks:/);
+  assert.deepEqual((await request(telegramApp).get(`/file/${key}`)).body, Buffer.from('abcdef'));
+  const ranged = await request(telegramApp).get(`/file/${key}`).set('Range', 'bytes=2-4');
+  assert.equal(ranged.status, 206);
+  assert.deepEqual(ranged.body, Buffer.from('cde'));
+  await assert.rejects(fs.stat(telegramConfig.storageDir), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(telegramConfig.chunksDir), { code: 'ENOENT' });
+  telegramStore.close();
+});
